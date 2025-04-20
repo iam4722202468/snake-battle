@@ -9,8 +9,7 @@ interface Position {
 interface Snake {
     id: string;
     segments: Position[];
-    direction: 'up' | 'down' | 'left' | 'right';
-    color: string; // Added color property
+    direction: 'up' | 'down' | 'left' | 'right'; // Now represents the *requested* direction
 }
 
 interface Player {
@@ -18,12 +17,14 @@ interface Player {
     snake: Snake;
     isRespawning: boolean; // Added
     respawnTimer: number;  // Added: Timestamp when respawn is complete
+    lastTickDirection: 'up' | 'down' | 'left' | 'right'; // Added: Direction moved in the previous tick
+    hue: number; // Added: Hue value (0-360)
 }
 
 export interface GameStateSnakeData { // Renamed for clarity
     id: string;
     segments: Position[];
-    color: string;
+    hue: number; // Added
     isRespawning: boolean; // Added
     respawnEndTime: number | null; // Added: Timestamp when respawn finishes, or null
 }
@@ -36,7 +37,7 @@ export interface GameState {
 
 // --- Constants ---
 const GRID_SIZE = 20;
-const TICK_RATE = 150; // Milliseconds between game updates
+const TICK_RATE = 75; // Decreased tick rate (milliseconds) - e.g., ~13.3 FPS
 const RESPAWN_DELAY = 3000; // Milliseconds (3 seconds)
 
 // --- Game Class ---
@@ -45,8 +46,6 @@ export class Game {
     private apple: Position;
     private intervalId: Timer | null = null;
     private gridSize: number = GRID_SIZE;
-    private availableColors: string[] = ['green', 'purple', 'orange', 'cyan', 'magenta', 'yellow']; // Example colors
-    private usedColors: Set<string> = new Set();
 
     constructor() {
         this.apple = this.getRandomPosition();
@@ -60,13 +59,13 @@ export class Game {
         }
 
         const startPosition = this.getRandomPosition();
-        const color = this.assignColor();
+        const initialDirection = 'right'; // Or random
+        const hue = this.assignHue(); // Assign a hue value
 
         const newSnake: Snake = {
             id: socketId,
             segments: [startPosition],
-            direction: 'right', // Default direction
-            color: color,
+            direction: initialDirection, // Requested direction
         };
 
         const newPlayer: Player = {
@@ -74,9 +73,11 @@ export class Game {
             snake: newSnake,
             isRespawning: false, // Initialize respawn state
             respawnTimer: 0,
+            lastTickDirection: initialDirection, // Initialize last tick direction
+            hue: hue, // Store the assigned hue
         };
         this.players.set(socketId, newPlayer);
-        console.log(`Player ${socketId} added at ${startPosition.x},${startPosition.y} with color ${color}. Total players: ${this.players.size}`);
+        console.log(`Player ${socketId} added at ${startPosition.x},${startPosition.y} with hue ${hue}. Total players: ${this.players.size}`);
 
         // Start game loop if this is the first player
         if (this.players.size === 1 && !this.intervalId) {
@@ -87,7 +88,6 @@ export class Game {
     removePlayer(socketId: string): void {
         const player = this.players.get(socketId);
         if (player) {
-            this.releaseColor(player.snake.color);
             this.players.delete(socketId);
             console.log(`Player ${socketId} removed. Total players: ${this.players.size}`);
         }
@@ -98,44 +98,24 @@ export class Game {
         }
     }
 
-    // --- Color Management ---
-    private assignColor(): string {
-        for (const color of this.availableColors) {
-            if (!this.usedColors.has(color)) {
-                this.usedColors.add(color);
-                return color;
-            }
-        }
-        // Fallback if all predefined colors are used
-        return `hsl(${Math.random() * 360}, 100%, 50%)`;
-    }
-
-    private releaseColor(color: string): void {
-        if (this.availableColors.includes(color)) {
-            this.usedColors.delete(color);
-        }
+    // --- Hue Management ---
+    private assignHue(): number {
+        // Simple strategy: assign based on number of players, wrap around 360 degrees
+        // More robust: track used hues, find gaps, or use a wider range/saturation/lightness variation
+        const numPlayers = this.players.size;
+        const baseHue = 120; // Start with green-ish
+        const hueStep = 60; // Step around the color wheel
+        return (baseHue + numPlayers * hueStep) % 360;
     }
 
     // --- Input Handling ---
     handleInput(socketId: string, direction: 'up' | 'down' | 'left' | 'right'): void {
         const player = this.players.get(socketId);
-        if (!player) return;
+        if (!player || player.isRespawning) return; // Ignore input if respawning
 
-        const currentDirection = player.snake.direction;
-        console.log(`[${socketId}] Input: ${direction}, Current: ${currentDirection}`); // Debug log
-
-        // Prevent reversing direction
-        if (
-            (direction === 'up' && currentDirection !== 'down') ||
-            (direction === 'down' && currentDirection !== 'up') ||
-            (direction === 'left' && currentDirection !== 'right') ||
-            (direction === 'right' && currentDirection !== 'left')
-        ) {
-            player.snake.direction = direction;
-            console.log(`[${socketId}] Direction changed to: ${direction}`); // Debug log
-        } else {
-             console.log(`[${socketId}] Direction change ignored (opposite or same).`); // Debug log
-        }
+        // Store the requested direction. Validation happens in the update loop.
+        player.snake.direction = direction;
+        // console.log(`[${socketId}] Requested direction: ${direction}`); // Optional log
     }
 
     // --- Game Loop ---
@@ -187,14 +167,35 @@ export class Game {
 
             const head = { ...snake.segments[0] };
 
-            // Move head based on direction
-            // ... (switch statement for movement) ...
-            switch (snake.direction) {
+            // --- Determine Valid Move Direction for this Tick ---
+            let directionToMove = snake.direction; // Start with requested direction
+            const isOpposite = (
+                (directionToMove === 'up' && player.lastTickDirection === 'down') ||
+                (directionToMove === 'down' && player.lastTickDirection === 'up') ||
+                (directionToMove === 'left' && player.lastTickDirection === 'right') ||
+                (directionToMove === 'right' && player.lastTickDirection === 'left')
+            );
+
+            if (isOpposite) {
+                // Invalid move: requested direction is opposite of the last actual move.
+                // Continue moving in the last valid direction.
+                directionToMove = player.lastTickDirection;
+                // console.log(`[${playerId}] Ignored opposite direction request (${snake.direction}). Continuing ${directionToMove}.`); // Optional log
+                // Update the snake's requested direction to match the actual move for consistency
+                snake.direction = directionToMove;
+            }
+
+            // --- Move Head ---
+            switch (directionToMove) {
                 case 'up': head.y -= 1; break;
                 case 'down': head.y += 1; break;
                 case 'left': head.x -= 1; break;
                 case 'right': head.x += 1; break;
             }
+
+            // --- Update Last Tick Direction ---
+            // Store the direction we actually moved in this tick
+            player.lastTickDirection = directionToMove;
 
             // --- Collision Detection ---
             // 1. Wall collision
@@ -256,8 +257,8 @@ export class Game {
         player.respawnTimer = Date.now() + RESPAWN_DELAY;
         player.snake.segments = []; // Clear segments visually during respawn
 
-        // Optional: Send a specific message to the client about the respawn start
-        // this.sendToPlayer(playerId, { type: 'respawnStart', payload: { delay: RESPAWN_DELAY } });
+        // Reset lastTickDirection on respawn (can be set when respawn finishes)
+        // player.lastTickDirection = 'right'; // Or set when respawn completes
     }
 
     // --- State & Broadcasting ---
@@ -282,7 +283,7 @@ export class Game {
         const snakesData = Array.from(this.players.values()).map(player => ({
             id: player.snake.id,
             segments: player.snake.segments,
-            color: player.snake.color,
+            hue: player.hue, // Send hue instead of color
             isRespawning: player.isRespawning,
             // Send the end time only if currently respawning
             respawnEndTime: player.isRespawning ? player.respawnTimer : null,
