@@ -1,7 +1,7 @@
 import React from 'react';
 
 // --- Constants ---
-const TRANSITION_DURATION_MS = 150; // Slightly more than CLIENT_TICK_RATE (150ms)
+const TRANSITION_DURATION_MS = 180; // Smoother transitions with longer duration
 
 interface SnakeProps {
     segments: { x: number; y: number }[];
@@ -27,8 +27,8 @@ const Snake: React.FC<SnakeProps> = ({ segments, hue, gridSize }) => {
                     top: `${(segment.y / gridSize) * 100}%`,
                     width: `${(1 / gridSize) * 100}%`,
                     height: `${(1 / gridSize) * 100}%`,
-                    // Use updated transition duration
-                    transition: `left ${TRANSITION_DURATION_MS}ms linear, top ${TRANSITION_DURATION_MS}ms linear`,
+                    // Smoother transition
+                    transition: `left ${TRANSITION_DURATION_MS}ms ease-out, top ${TRANSITION_DURATION_MS}ms ease-out`,
                     position: 'absolute',
                     lineHeight: 0,
                     // Apply hue-rotate filter

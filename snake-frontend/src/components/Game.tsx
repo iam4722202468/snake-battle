@@ -27,9 +27,11 @@ interface GameState {
 const GRID_SIZE = 20; // Default or fallback grid size
 const CLIENT_TICK_RATE = 150; // Reverted tick rate - Match server
 const RESPAWN_DELAY = 3000; // ms - Client-side constant, MUST match server
+const MAX_PREDICTION_BUFFER = 8; // Maximum number of moves to predict ahead
+const RECONCILIATION_THRESHOLD = 2; // How many segments can be off before hard reconciliation
 
 const Game: React.FC = () => {
-    const { sendMessage, lastMessage, readyState } = useWebSocket();
+    const { sendMessage, lastMessage, readyState, latency } = useWebSocket();
     const [gameState, setGameState] = useState<GameState | null>(null);
     const [clientId, setClientId] = useState<string | null>(null);
 
@@ -43,6 +45,33 @@ const Game: React.FC = () => {
     const lastUpdateTimeRef = useRef<number>(0);
     const gameLoopRef = useRef<number | null>(null);
     const predictedDeathRef = useRef<boolean>(false); // Ref to track local death prediction
+    const inputHistoryRef = useRef<Array<{direction: string, timestamp: number}>>([]);
+    const lastServerUpdateRef = useRef<number>(Date.now());
+    // Keep a more robust queue of directions to process
+    const directionQueueRef = useRef<Array<'up' | 'down' | 'left' | 'right'>>([]);
+
+    // --- Helper function for comparing positions ---
+    const arePositionsEqual = (pos1: Position, pos2: Position): boolean => {
+        return pos1.x === pos2.x && pos1.y === pos2.y;
+    };
+
+    // --- Helper function to measure segment difference ---
+    const calculateSegmentDifference = (predicted: Position[], server: Position[]): number => {
+        const minLength = Math.min(predicted.length, server.length);
+        let differences = 0;
+        
+        // Check position differences in common segments
+        for (let i = 0; i < minLength; i++) {
+            if (!arePositionsEqual(predicted[i], server[i])) {
+                differences++;
+            }
+        }
+        
+        // Add the length difference
+        differences += Math.abs(predicted.length - server.length);
+        
+        return differences;
+    };
 
     // --- Server Message Handling & Reconciliation ---
     useEffect(() => {
@@ -56,10 +85,11 @@ const Game: React.FC = () => {
                     console.log("Assigned Client ID:", newClientId);
                     // Initial state often comes with assignment or shortly after
                 } else if (data.type === 'gameState') {
+                    lastServerUpdateRef.current = Date.now();
                     const serverState: GameState = data.payload;
                     setGameState(serverState); // Update overall game state
 
-                    // --- Reconciliation ---
+                    // --- Improved Reconciliation ---
                     if (clientId) {
                         const clientSnakeServerState = serverState.snakes.find(s => s.id === clientId);
                         if (clientSnakeServerState) {
@@ -70,6 +100,7 @@ const Game: React.FC = () => {
                                     setIsClientRespawning(true);
                                     setRespawnEndTime(clientSnakeServerState.respawnEndTime); // Store end time
                                     setQueuedDirection(null); // Clear queue on respawn start
+                                    inputHistoryRef.current = []; // Clear input history
                                 }
                                 // Server confirmed, so clear the local prediction flag
                                 predictedDeathRef.current = false;
@@ -82,17 +113,39 @@ const Game: React.FC = () => {
                                      setRespawnEndTime(null); // Clear end time
                                      setRespawnCountdown(null); // Clear countdown display
                                      setQueuedDirection(null); // Clear queue on respawn end
+                                     inputHistoryRef.current = []; // Clear input history
+                                     setPredictedSegments(clientSnakeServerState.segments);
                                 } else if (predictedDeathRef.current) {
                                     // We predicted death, but server hasn't confirmed yet. Keep waiting.
                                     console.log(`[Client ${clientId}] Waiting for server respawn confirmation...`);
+                                } else {
+                                    // Normal gameplay state - selective reconciliation
+                                    // 1. Check if segments differ significantly from our prediction
+                                    const segmentDifference = calculateSegmentDifference(
+                                        predictedSegments, 
+                                        clientSnakeServerState.segments
+                                    );
+                                    
+                                    if (segmentDifference > RECONCILIATION_THRESHOLD) {
+                                        // Too much difference - hard reconcile
+                                        console.log(`[Client ${clientId}] Hard reconciliation (${segmentDifference} differences).`);
+                                        setPredictedSegments(clientSnakeServerState.segments);
+                                        inputHistoryRef.current = []; // Clear input history past this point
+                                    } else if (segmentDifference > 0) {
+                                        // Small difference - soft reconcile (keep predicted head position)
+                                        console.log(`[Client ${clientId}] Soft reconciliation (${segmentDifference} differences).`);
+                                        // If the difference is small, we might want to keep our predicted head position
+                                        // but adjust the rest based on server state
+                                        const newSegments = [...clientSnakeServerState.segments];
+                                        if (predictedSegments.length > 0) {
+                                            // Replace head with our predicted head, if we have one
+                                            newSegments[0] = predictedSegments[0];
+                                        }
+                                        setPredictedSegments(newSegments);
+                                    } else {
+                                        // No difference - no need to reconcile
+                                    }
                                 }
-                                // Always update predicted segments from server when not respawning
-                                // This ensures the client gets the correct position after respawn ends
-                                if (!isClientRespawning && !predictedDeathRef.current) {
-                                     setPredictedSegments(clientSnakeServerState.segments);
-                                }
-                                // Optional: Add a log if reconciliation happened, but avoid comparing complex objects frequently
-                                // console.log(`[Client ${clientId}] Reconciled segments.`);
                             }
                         } else {
                             // Handle case where client snake is not in server state
@@ -103,6 +156,7 @@ const Game: React.FC = () => {
                                 setRespawnEndTime(null); // Cannot know end time if missing state
                                 setRespawnCountdown(null);
                                 setQueuedDirection(null); // Clear queue if snake disappears
+                                inputHistoryRef.current = []; // Clear input history
                             }
                             // Server state reflects snake is gone, clear local prediction flag
                             predictedDeathRef.current = false;
@@ -119,6 +173,9 @@ const Game: React.FC = () => {
 
     // --- Input Handling ---
     const handleKeyDown = useCallback((event: KeyboardEvent) => {
+        // Ignore key repeat events and respawning state
+        if (event.repeat || isClientRespawning) return;
+        
         let newDirection: 'up' | 'down' | 'left' | 'right' | null = null;
         switch (event.key) {
             case 'ArrowUp': case 'w': newDirection = 'up'; break;
@@ -127,13 +184,61 @@ const Game: React.FC = () => {
             case 'ArrowRight': case 'd': newDirection = 'right'; break;
         }
 
-        // Update queue AND send message immediately
         if (newDirection && readyState === WebSocket.OPEN) {
-             setQueuedDirection(newDirection);
-             // Send move command immediately to server
-             sendMessage({ type: 'move', payload: { direction: newDirection } });
+            // Immediately send to server for responsive controls
+            sendMessage({ type: 'move', payload: { direction: newDirection } });
+            
+            // Add to our direction queue
+            directionQueueRef.current.push(newDirection);
+            
+            // Record input with timestamp in history
+            const timestamp = Date.now();
+            inputHistoryRef.current.push({
+                direction: newDirection,
+                timestamp: timestamp
+            });
+            
+            // Limit history size
+            if (inputHistoryRef.current.length > MAX_PREDICTION_BUFFER) {
+                inputHistoryRef.current.shift();
+            }
         }
-    }, [readyState, sendMessage]); // Added sendMessage back
+    }, [readyState, sendMessage, isClientRespawning]);
+
+    // --- Additional Continuous Input Processing ---
+    useEffect(() => {
+        // Process the input queue more frequently than the game tick
+        const processInputQueue = () => {
+            // Skip if respawning or no queue
+            if (isClientRespawning || directionQueueRef.current.length === 0) {
+                return;
+            }
+            
+            // Get the next direction from queue
+            const nextDirection = directionQueueRef.current[0];
+            
+            const isValidDirection = !(
+                (nextDirection === 'up' && predictedDirection === 'down') ||
+                (nextDirection === 'down' && predictedDirection === 'up') ||
+                (nextDirection === 'left' && predictedDirection === 'right') ||
+                (nextDirection === 'right' && predictedDirection === 'left') ||
+                nextDirection === predictedDirection
+            );
+            
+            if (isValidDirection) {
+                // Apply valid direction immediately to be responsive
+                setPredictedDirection(nextDirection);
+            }
+            
+            // Always remove the processed direction from queue
+            directionQueueRef.current.shift();
+        };
+        
+        // Run input processing at a higher frequency than game ticks
+        const intervalId = setInterval(processInputQueue, 20); // 50Hz processing (every 20ms)
+        
+        return () => clearInterval(intervalId);
+    }, [isClientRespawning, predictedDirection]);
 
     useEffect(() => {
         window.addEventListener('keydown', handleKeyDown);
@@ -149,31 +254,13 @@ const Game: React.FC = () => {
                  return;
             }
 
-            // --- Process Input Queue Immediately (Updates local predictedDirection) ---
-            // Check and apply queued direction changes before the tick calculation
-            if (queuedDirection) {
-                const isValidQueuedDirection = !(
-                    (queuedDirection === 'up' && predictedDirection === 'down') ||
-                    (queuedDirection === 'down' && predictedDirection === 'up') ||
-                    (queuedDirection === 'left' && predictedDirection === 'right') ||
-                    (queuedDirection === 'right' && predictedDirection === 'left') ||
-                    queuedDirection === predictedDirection
-                );
-
-                if (isValidQueuedDirection) {
-                    // Apply the direction change locally for prediction
-                    setPredictedDirection(queuedDirection);
-                    // sendMessage({ type: 'move', payload: { direction: queuedDirection } }); // Removed from here
-                    setQueuedDirection(null); // Clear the queue
-                } else {
-                    // If queued direction is invalid (opposite or same), just clear it
-                    setQueuedDirection(null);
-                }
-            }
-
+            // Remove the queue processing from here since we're handling it in a separate effect
+            // This ensures inputs are applied more responsively and not just on tick boundaries
 
             // --- Tick-Based Movement Prediction ---
             const delta = timestamp - lastUpdateTimeRef.current;
+            const estimatedServerTime = Date.now() - (latency / 2); // Account for one-way latency
+            
             if (delta >= CLIENT_TICK_RATE) { // Use reverted tick rate
                 lastUpdateTimeRef.current = timestamp;
 
@@ -219,7 +306,6 @@ const Game: React.FC = () => {
                             return [];
                         }
 
-
                         // --- Predict Self-Collision ---
                         // ... existing logic ...
                          const selfCollision = prevSegments.slice(1).some(
@@ -253,7 +339,6 @@ const Game: React.FC = () => {
                             }
                         }
 
-
                         // --- Predict Apple Eating ---
                         // ... existing logic ...
                         let ateApplePredicted = false;
@@ -262,14 +347,12 @@ const Game: React.FC = () => {
                             ateApplePredicted = true;
                         }
 
-
                         // --- Update Segments ---
                         const newSegments = [...prevSegments];
                         // Only add the head if it actually moved (didn't stall due to double-back prediction)
                         if (nextHead.x !== currentHead.x || nextHead.y !== currentHead.y) {
                              newSegments.unshift(nextHead);
                         }
-
 
                         // --- Tail Removal Logic ---
                         // ... existing logic ...
@@ -285,7 +368,6 @@ const Game: React.FC = () => {
                                   }
                              }
                         }
-
 
                         return newSegments;
                     });
@@ -305,7 +387,7 @@ const Game: React.FC = () => {
                 cancelAnimationFrame(gameLoopRef.current);
             }
         };
-    }, [clientId, predictedDirection, gameState, predictedSegments.length, isClientRespawning, queuedDirection, sendMessage]); // sendMessage is technically not needed here anymore, but harmless
+    }, [clientId, predictedDirection, gameState, predictedSegments.length, isClientRespawning, queuedDirection, sendMessage, latency]); // sendMessage is technically not needed here anymore, but harmless
 
     // --- Respawn Countdown Timer ---
     useEffect(() => {
@@ -335,6 +417,13 @@ const Game: React.FC = () => {
         };
     }, [isClientRespawning, respawnEndTime]); // Run when respawn state or end time changes
 
+    // When component unmounts or when key dependencies change, clear the direction queue
+    useEffect(() => {
+        return () => {
+            directionQueueRef.current = [];
+        };
+    }, [clientId, isClientRespawning]);
+
     // --- Rendering ---
     const gridSize = gameState?.gridSize ?? GRID_SIZE;
     const connectionStatus = {
@@ -351,7 +440,7 @@ const Game: React.FC = () => {
             {/* ... Header, Status, Client ID ... */}
              <h1 className="text-3xl font-bold mb-2 text-gray-800 dark:text-gray-200">Multiplayer Snake</h1>
             <p className="mb-1 text-sm text-gray-600 dark:text-gray-400">Status: {connectionStatus}</p>
-            {clientId && <p className="mb-3 text-sm text-blue-600 dark:text-blue-400">Your ID: {clientId}</p>}
+            {clientId && <p className="mb-3 text-sm text-blue-600 dark:text-blue-400">Your ID: {clientId} - Ping: {latency}ms</p>}
 
             <div
                 className="relative game-grid-bg border-2 border-gray-500 dark:border-gray-700 shadow-lg overflow-hidden" // Added overflow-hidden

@@ -51,6 +51,9 @@ const server = Bun.serve<{ socketId: string }>({
                     }
                 } else if (parsedMessage.type === 'died') { // Added handler
                     game.handlePlayerDied(socketId);
+                } else if (parsedMessage.type === 'ping') {
+                    // Respond to ping with pong
+                    ws.send(JSON.stringify({ type: 'pong' }));
                 } else {
                      console.warn(`Unknown message type or format from ${socketId}: ${message}`);
                 }
