@@ -47,11 +47,17 @@ export const useClientGameLoop = ({
     const inputBufferRef = useRef<Direction[]>([]);
     const gameLoopIntervalRef = useRef<NodeJS.Timeout | null>(null);
     const onPositionUpdateRef = useRef(onPositionUpdate); // Ref for the callback
+    const appleRef = useRef(apple); // Ref for the current apple position
 
     // Keep the callback ref updated
     useEffect(() => {
         onPositionUpdateRef.current = onPositionUpdate;
     }, [onPositionUpdate]);
+
+    // Keep the apple ref updated
+    useEffect(() => {
+        appleRef.current = apple;
+    }, [apple]);
 
     // Update the currentDirectionRef whenever the actual direction changes
     useEffect(() => {
@@ -150,7 +156,8 @@ export const useClientGameLoop = ({
                     newHead.y = (newHead.y + gridSize) % gridSize;
 
                     // Client-side prediction of eating apple
-                    const ateApple = newHead.x === apple.x && newHead.y === apple.y;
+                    const currentApple = appleRef.current; // Get latest apple position from ref
+                    const ateApple = newHead.x === currentApple.x && newHead.y === currentApple.y;
 
                     let newSegments = [newHead, ...prevSegments];
 

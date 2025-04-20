@@ -15,14 +15,18 @@ interface ServerSnake {
     ws: ServerWebSocket<{ socketId: string }>;
 }
 
+// Add isRespawning to the player data sent to clients
+export interface PlayerStateForClient {
+    id: string;
+    segments: Position[];
+    direction: Direction;
+    hue: number;
+    size: number;
+    isRespawning: boolean; // Added
+}
+
 export interface GameStateData {
-    players: {
-        id: string;
-        segments: Position[];
-        direction: Direction;
-        hue: number;
-        size: number;
-    }[];
+    players: PlayerStateForClient[]; // Use the new interface
     apple: Position;
     gridSize: number;
 }
@@ -73,18 +77,30 @@ export class Game {
     // Handle position updates from clients
     handlePositionUpdate(socketId: string, data: { segments: Position[], direction: Direction }): void {
         const player = this.players.get(socketId);
-        if (!player || player.isRespawning) return;
-        
-        // Simply accept the client's position data
-        player.segments = data.segments;
+        if (!player || player.isRespawning || data.segments.length === 0) return;
+
+        // Update player state based on client data
         player.direction = data.direction;
-        player.size = data.segments.length;
-        
-        // Check for collisions
+        player.segments = data.segments; // Trust client's predicted segments for now
+
+        const head = player.segments[0];
+        const ateApple = head.x === this.apple.x && head.y === this.apple.y;
+
+        if (ateApple) {
+            // Client predicted eating the apple, and server confirms
+            player.size++; // Increment server's authoritative size
+            this.apple = this.getRandomPosition(); // Generate new apple
+            this.broadcastAppleEat(socketId); // Notify clients
+        } else {
+            // Client did not eat the apple (or predicted incorrectly)
+            // Ensure server size matches the actual segment length received
+            player.size = player.segments.length;
+        }
+
+        // Check for collisions *after* updating position and potentially size
         this.checkCollisions(socketId);
-        
-        // Check for apple eating
-        this.checkAppleEating(socketId);
+
+        // Removed separate checkAppleEating call, it's handled above
     }
 
     // Check if player has hit a wall, itself, or another player
@@ -117,74 +133,81 @@ export class Game {
         }
     }
     
-    // Check if player ate an apple
-    private checkAppleEating(playerId: string): void {
-        const player = this.players.get(playerId);
-        if (!player || player.isRespawning || player.segments.length === 0) return;
-        
-        const head = player.segments[0];
-        
-        // Check if head position matches apple position
-        if (head.x === this.apple.x && head.y === this.apple.y) {
-            // Generate new apple
-            this.apple = this.getRandomPosition();
-            
-            // Notify all clients about the apple being eaten
-            this.broadcastAppleEat(playerId);
-        }
-    }
-    
     // Handle player death
     private handlePlayerDeath(playerId: string, reason: "wall" | "snake" | "self", collidedWithId?: string): void {
         const player = this.players.get(playerId);
         if (!player || player.isRespawning) return;
-        
+
+        console.log(`Player ${playerId} died. Reason: ${reason}`); // Add logging
+
         // Mark player as respawning
         player.isRespawning = true;
         player.respawnEndTime = Date.now() + RESPAWN_DELAY;
         player.segments = []; // Clear segments
-        
+
         // Send death notification to the player
         if (player.ws.readyState === WebSocket.OPEN) {
             player.ws.send(JSON.stringify({
                 type: 'death',
                 payload: {
+                    playerId: playerId, // Added: Explicitly send the ID of the dead player
                     reason,
                     collidedWith: collidedWithId,
                     respawnDelay: RESPAWN_DELAY
                 }
             }));
+        } else {
+             console.log(`Could not send death notification to ${playerId}, WebSocket not open.`); // Add logging
         }
-        
+
         // Schedule respawn
         setTimeout(() => this.respawnPlayer(playerId), RESPAWN_DELAY);
     }
-    
+
     // Respawn a player after death
     private respawnPlayer(playerId: string): void {
         const player = this.players.get(playerId);
-        if (!player || !player.isRespawning) return;
-        
+        // Ensure player exists and is still marked as respawning (might have disconnected)
+        if (!player || !player.isRespawning) {
+             console.log(`Respawn cancelled for ${playerId} (player not found or no longer respawning).`);
+             // If player disconnected, they should already be removed by the close handler
+             if (!this.players.has(playerId)) {
+                 return;
+             }
+             // If they somehow got marked as not respawning, ensure state is consistent
+             if (player && !player.isRespawning) {
+                 player.segments = player.segments.length > 0 ? player.segments : [this.getRandomPosition()]; // Ensure they have segments if alive
+                 player.size = player.segments.length;
+                 return;
+             }
+             return;
+        }
+        console.log(`Respawning player ${playerId}...`); // Add logging
+
         // Reset player state
         const startPosition = this.getRandomPosition();
-        player.isRespawning = false;
+        player.isRespawning = false; // Mark as active *before* sending respawn message
         player.respawnEndTime = 0;
         player.segments = [startPosition];
         player.size = 1;
         player.direction = 'right'; // Default direction
-        
+
         // Notify player about respawn
         if (player.ws.readyState === WebSocket.OPEN) {
             player.ws.send(JSON.stringify({
                 type: 'respawn',
                 payload: {
+                    playerId: playerId, // Added: Explicitly send the ID
                     position: startPosition,
                     direction: player.direction
                 }
             }));
+        } else {
+             console.log(`Could not send respawn notification to ${playerId}, WebSocket not open.`); // Add logging
         }
+        // No need to broadcast game state immediately, the regular broadcast will pick it up
     }
-    
+
     // Broadcast apple eaten event
     private broadcastAppleEat(eatenBy: string): void {
         const message = JSON.stringify({
@@ -235,33 +258,45 @@ export class Game {
     // Send initial state to a new player
     private sendInitialState(playerId: string): void {
         const player = this.players.get(playerId);
-        if (!player || player.ws.readyState !== WebSocket.OPEN) return;
-        
+        if (!player || player.ws.readyState !== WebSocket.OPEN) {
+            console.log(`Cannot send initial state to ${playerId}, player not found or WS not open.`);
+            return;
+        }
+
+        console.log(`Sending initial state to ${playerId}...`); // Add logging
+
         // First, assign ID
         player.ws.send(JSON.stringify({
             type: 'assign_id',
             payload: { id: playerId }
         }));
-        
-        // Then send game state
-        player.ws.send(JSON.stringify({
-            type: 'game_state',
-            payload: this.getGameState()
-        }));
+
+        // Wait a small amount of time before sending game_state to ensure client processes the ID first
+        setTimeout(() => {
+            if (player && player.ws.readyState === WebSocket.OPEN) {
+                const gameStatePayload = this.getGameState();
+                console.log(`Sending initial game_state to ${playerId} after ID assignment`);
+                player.ws.send(JSON.stringify({
+                    type: 'game_state',
+                    payload: gameStatePayload
+                }));
+            }
+        }, 50); // 50ms delay should be enough for most clients to process the ID
     }
     
     // Get current game state
     private getGameState(): GameStateData {
+        // Include ALL players, but add the isRespawning flag
         const players = Array.from(this.players.values())
-            .filter(player => !player.isRespawning) // Don't include respawning players
             .map(player => ({
                 id: player.id,
                 segments: player.segments,
                 direction: player.direction,
                 hue: player.hue,
-                size: player.size
+                size: player.size,
+                isRespawning: player.isRespawning // Include respawn status
             }));
-        
+
         return {
             players,
             apple: this.apple,

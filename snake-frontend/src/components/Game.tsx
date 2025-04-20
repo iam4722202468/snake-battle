@@ -5,12 +5,14 @@ import Snake from './Snake';
 import Apple from './Apple';
 import { useWebSocket } from '../hooks/useWebSocket'; // Re-import WebSocket hook
 
-interface Player { // Define Player interface for other players
+// Update Player interface to include isRespawning
+interface Player {
     id: string;
     segments: { x: number; y: number }[];
     direction: Direction;
     hue: number;
     size: number;
+    isRespawning: boolean; // Added
 }
 
 interface Position { x: number; y: number; }
@@ -35,6 +37,7 @@ const Game: React.FC = () => {
     const [otherPlayers, setOtherPlayers] = useState<Player[]>([]);
     const [isRespawning, setIsRespawning] = useState<boolean>(false); // Controlled by server messages
     const [initialPosition, setInitialPosition] = useState<Position | null>(null); // For respawn
+    const [totalPlayers, setTotalPlayers] = useState<number>(0); // State for total player count
 
     // Callback to send position updates to the server
     const handlePositionUpdate = useCallback((segments: Position[], direction: Direction) => {
@@ -73,12 +76,16 @@ const Game: React.FC = () => {
 
         try {
             const data = JSON.parse(lastMessage.data);
+            // Log received message type
+            console.log(`Received message type: ${data.type}`, data.payload);
 
             switch (data.type) {
                 case 'assign_id':
-                    setClientId(data.payload.id);
+                    const newClientId = data.payload.id;
+                    console.log(`Processing 'assign_id'. Current clientId: ${clientId}, New clientId: ${newClientId}`);
+                    setClientId(newClientId);
                     hasSyncedRef.current = false; // Reset sync flag on new id
-                    console.log("Assigned client ID:", data.payload.id);
+                    console.log(`Set clientId to: ${newClientId}`);
                     break;
 
                 case 'game_state':
@@ -88,25 +95,49 @@ const Game: React.FC = () => {
                     if (data.payload.apple) {
                         setApple(data.payload.apple);
                     }
-                    if (Array.isArray(data.payload.players) && clientId) {
-                        // Update other players, filter out self
-                        const others = data.payload.players.filter(p => p.id !== clientId);
-                        setOtherPlayers(others);
+                    // --- Update player list handling ---
+                    if (Array.isArray(data.payload.players)) {
+                        // Update total player count based on the full list from server
+                        setTotalPlayers(data.payload.players.length);
 
-                        // Find self in server state to potentially correct score/length if needed,
-                        // but primarily rely on local segments for score display
-                        const selfData = data.payload.players.find(p => p.id === clientId);
+                        if (clientId) {
+                            // Filter out self first
+                            const allOthers = data.payload.players.filter(p => p.id !== clientId);
+                            // Filter out respawning players for rendering
+                            const activeOthers = allOthers.filter(p => !p.isRespawning);
+                            setOtherPlayers(activeOthers);
 
-                        // --- Sync local snake to server state on first connect ---
-                        if (selfData && !hasSyncedRef.current) {
-                            setSegments(selfData.segments);
-                            hasSyncedRef.current = true;
+                            // Find self in server state
+                            const selfData = data.payload.players.find(p => p.id === clientId);
+
+                            // Sync local snake segments and score (logic remains the same)
+                            if (selfData && !hasSyncedRef.current) {
+                                console.log(`Initial sync for ${clientId}. Segments:`, selfData.segments);
+                                setSegments(selfData.segments);
+                                hasSyncedRef.current = true;
+                                setScore(selfData.size || 1);
+                            } else if (selfData) {
+                                // Update score only if it differs? Or always? Let's always update for now.
+                                setScore(selfData.size || 1);
+                                // If selfData shows we are respawning, update local state
+                                if (selfData.isRespawning && !isRespawning) {
+                                     console.log("Syncing local isRespawning to true based on server state");
+                                     setIsRespawning(true);
+                                     // Optional: Start countdown if not already started by 'death' message
+                                } else if (!selfData.isRespawning && isRespawning) {
+                                     // This case handled by 'respawn' message normally
+                                }
+                            } else if (!selfData && hasSyncedRef.current) {
+                                // If selfData is missing after sync (e.g., during respawn),
+                                // it implies we are respawning according to the server.
+                                if (!isRespawning) {
+                                    console.log("Syncing local isRespawning to true (self not found in server state)");
+                                    setIsRespawning(true);
+                                }
+                            }
+                        } else {
+                            console.log("Processing 'game_state' but clientId is not set yet. Clearing other players.");
                         }
-                        // Score is now based on local prediction length
-                        setScore(segments.length > 0 ? segments.length : (selfData?.size || 1));
-                    } else if (Array.isArray(data.payload.players)) {
-                        // If clientId not set yet, just update others
-                         setOtherPlayers(data.payload.players);
                     }
                     break;
 
@@ -120,54 +151,71 @@ const Game: React.FC = () => {
                     break;
 
                 case 'death':
-                    // Server tells us we died
-                    if (data.payload && clientId) { // Check if message is for us implicitly (server only sends to dead player)
-                        console.log("Received death message:", data.payload);
-                        setIsRespawning(true);
-                        const respawnDelay = data.payload.respawnDelay || (RESPAWN_COUNTDOWN_DURATION * 1000);
-                        const endTime = Date.now() + respawnDelay;
+                    // Verify the death message is for this client
+                    if (data.payload && data.payload.playerId === clientId) {
+                        console.log("Received death message FOR ME:", data.payload);
+                        if (!isRespawning) { // Prevent duplicate state updates
+                            setIsRespawning(true);
+                            // Score is already set by game_state, but ensure it's captured before respawn UI shows
+                            // setScore(score); // score state should be up-to-date
 
-                        if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
-                        setRespawnCountdown(Math.ceil(respawnDelay / 1000)); // Initial countdown value
+                            const respawnDelay = data.payload.respawnDelay || (RESPAWN_COUNTDOWN_DURATION * 1000);
+                            const endTime = Date.now() + respawnDelay;
 
-                        countdownIntervalRef.current = setInterval(() => {
-                            const remaining = Math.max(0, Math.ceil((endTime - Date.now()) / 1000));
-                            setRespawnCountdown(remaining);
-                            if (remaining <= 0 && countdownIntervalRef.current) {
-                                clearInterval(countdownIntervalRef.current);
-                                countdownIntervalRef.current = null;
-                                // Server will send 'respawn' message
-                            }
-                        }, 500); // Update countdown display twice a second
+                            if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+                            setRespawnCountdown(Math.ceil(respawnDelay / 1000));
+
+                            countdownIntervalRef.current = setInterval(() => {
+                                const remaining = Math.max(0, Math.ceil((endTime - Date.now()) / 1000));
+                                setRespawnCountdown(remaining);
+                                if (remaining <= 0 && countdownIntervalRef.current) {
+                                    clearInterval(countdownIntervalRef.current);
+                                    countdownIntervalRef.current = null;
+                                }
+                            }, 500);
+                        }
+                    } else if (data.payload && clientId) {
+                         console.log(`Received death message for other player (${data.payload.playerId}), ignoring.`);
                     }
                     break;
 
                 case 'respawn':
-                     // Server tells us we have respawned
-                    if (data.payload && clientId) { // Check if message is for us implicitly
-                        console.log("Received respawn message:", data.payload);
-                        setIsRespawning(false);
-                        setRespawnCountdown(null);
-                        if (countdownIntervalRef.current) {
-                            clearInterval(countdownIntervalRef.current);
-                            countdownIntervalRef.current = null;
+                     // Verify the respawn message is for this client
+                    if (data.payload && data.payload.playerId === clientId) {
+                        console.log("Received respawn message FOR ME:", data.payload);
+                        if (isRespawning) { // Prevent duplicate state updates
+                            setIsRespawning(false);
+                            setRespawnCountdown(null);
+                            if (countdownIntervalRef.current) {
+                                clearInterval(countdownIntervalRef.current);
+                                countdownIntervalRef.current = null;
+                            }
+                            if (data.payload.position) {
+                                setInitialPosition(data.payload.position);
+                                setTimeout(() => setInitialPosition(null), 50);
+                                hasSyncedRef.current = true; // Mark as synced after respawn
+                            }
                         }
-                        if (data.payload.position) {
-                            // Trigger position reset in the game loop hook
-                            setInitialPosition(data.payload.position);
-                            // Clear initialPosition slightly later so hook can process it
-                            setTimeout(() => setInitialPosition(null), 50);
-                        }
+                    } else if (data.payload && clientId) {
+                         console.log(`Received respawn message for other player (${data.payload.playerId}), ignoring.`);
                     }
                     break;
 
                 default:
+                    // Log unhandled message types
+                    console.log(`Unhandled message type: ${data.type}`);
                     break; // Ignore unknown message types
             }
         } catch (error) {
-            console.error("Error processing server message:", error);
+            console.error("Error processing server message:", error, "Raw data:", lastMessage?.data);
         }
-    }, [lastMessage, clientId, setSegments, segments.length]); // segments.length needed for score update
+        // Dependencies: Added setIsRespawning, isRespawning
+    }, [lastMessage, clientId, setSegments, setScore, isRespawning, setIsRespawning]);
+
+    // Add a separate effect to log clientId changes
+    useEffect(() => {
+        console.log(`clientId state updated in component: ${clientId}`);
+    }, [clientId]);
 
     // Handle keyboard input (no changes needed here)
     useEffect(() => {
@@ -207,11 +255,15 @@ const Game: React.FC = () => {
         <div className="flex flex-col items-center">
             {/* Title */}
             <h1 className="text-3xl font-bold mb-2 text-gray-800 dark:text-gray-200">Snake Online</h1>
-            {/* Show Player ID */}
-            {clientId && (
+            {/* Show Player ID - Add log */}
+            {clientId ? (
                 <div className="mb-1 text-xs text-gray-500 dark:text-gray-400">
                     Your Player ID: <span className="font-mono">{clientId}</span>
                 </div>
+            ) : (
+                 <div className="mb-1 text-xs text-orange-500 dark:text-orange-400">
+                    Player ID: Not assigned yet
+                 </div>
             )}
             {/* Connection Status & Latency */}
             <div className="flex items-center gap-2 mb-1 text-xs">
@@ -230,10 +282,13 @@ const Game: React.FC = () => {
 
             {/* Game stats */}
             <div className="mb-2 flex items-center gap-4 text-sm">
+                {/* Score is now directly from server state */}
                 <p className="font-bold">Score: {score}</p>
-                <p>Length: {segments.length}</p>
+                {/* Length display still uses local prediction for smoothness */}
+                <p>Length: {!isRespawning && segments.length > 0 ? segments.length : 0}</p>
                 <p>Input: <span className="font-mono uppercase">{displayDirection}</span></p>
-                <p>Players: {1 + otherPlayers.length}</p>
+                {/* Player count uses the total count from server state */}
+                <p>Players: {totalPlayers}</p>
             </div>
 
             {/* Game board */}

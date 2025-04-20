@@ -21,6 +21,52 @@ export function useWebSocket(): WebSocketHook {
     const pingTimeRef = useRef<number | null>(null);
     const pingIntervalRef = useRef<NodeJS.Timeout | null>(null);
     const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const messageQueueRef = useRef<MessageEvent[]>([]); // Message queue
+    const processingMessageRef = useRef<boolean>(false); // Flag to track if we're processing a message
+    const processingTimeoutRef = useRef<NodeJS.Timeout | null>(null); // Timeout for message processing
+
+    // Function to process the next message in the queue
+    const processNextMessage = useCallback(() => {
+        if (processingMessageRef.current || messageQueueRef.current.length === 0) {
+            return;
+        }
+        
+        processingMessageRef.current = true;
+        const message = messageQueueRef.current.shift()!;
+        
+        try {
+            // Just log for debugging purposes
+            const data = JSON.parse(message.data);
+            console.log(`Processing queued message: ${data.type}`);
+        } catch (e) {
+            // Ignore parse errors in log
+        }
+
+        // Deliver the message
+        setLastMessage(message);
+        
+        // Schedule the next message processing with a slight delay
+        // to allow React state updates to complete
+        processingTimeoutRef.current = setTimeout(() => {
+            processingMessageRef.current = false;
+            processNextMessage();
+        }, 10); // Small delay to ensure state updates
+    }, []);
+
+    const sendMessage = useCallback((message: any) => {
+        if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+            ws.current.send(JSON.stringify(message));
+        } else {
+            console.warn('WebSocket not connected. Message not sent:', message);
+        }
+    }, []);
+
+
+    // Function to queue a message
+    const queueMessage = useCallback((event: MessageEvent) => {
+        messageQueueRef.current.push(event);
+        processNextMessage();
+    }, [processNextMessage]);
 
     const connect = useCallback(() => {
         if (reconnectTimeoutRef.current) {
@@ -66,6 +112,13 @@ export function useWebSocket(): WebSocketHook {
             console.log(`WebSocket Disconnected (Code: ${event.code}, Reason: ${event.reason})`);
             setReadyState(WebSocket.CLOSED);
             ws.current = null;
+            // Clear message queue on disconnect
+            messageQueueRef.current = [];
+            processingMessageRef.current = false;
+            if (processingTimeoutRef.current) {
+                clearTimeout(processingTimeoutRef.current);
+                processingTimeoutRef.current = null;
+            }
             if (pingIntervalRef.current) {
                 clearInterval(pingIntervalRef.current);
                 pingIntervalRef.current = null;
@@ -91,12 +144,32 @@ export function useWebSocket(): WebSocketHook {
                     const rtt = Date.now() - data.payload.ts;
                     setLatency(rtt);
                     pingTimeRef.current = null;
+                    return; // Don't queue pong messages
+                }
+                
+                // Special handling for assign_id: prioritize it
+                if (data.type === 'assign_id') {
+                    console.log('Received assign_id message, processing immediately');
+                    // Clear the queue first
+                    messageQueueRef.current = [];
+                    if (processingTimeoutRef.current) {
+                        clearTimeout(processingTimeoutRef.current);
+                        processingTimeoutRef.current = null;
+                    }
+                    processingMessageRef.current = false;
+                    
+                    // Process it immediately 
+                    setLastMessage(event);
+                    return;
                 }
             } catch (e) {
+                // Ignore parse errors
             }
-            setLastMessage(event);
+            
+            // Queue all other messages
+            queueMessage(event);
         };
-    }, []);
+    }, [queueMessage, sendMessage]);
 
     useEffect(() => {
         connect();
@@ -108,6 +181,9 @@ export function useWebSocket(): WebSocketHook {
             if (pingIntervalRef.current) {
                 clearInterval(pingIntervalRef.current);
             }
+            if (processingTimeoutRef.current) {
+                clearTimeout(processingTimeoutRef.current);
+            }
             if (ws.current) {
                 console.log("Closing WebSocket connection on unmount.");
                 ws.current.onclose = null;
@@ -116,14 +192,6 @@ export function useWebSocket(): WebSocketHook {
             ws.current = null;
         };
     }, [connect]);
-
-    const sendMessage = useCallback((message: any) => {
-        if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-            ws.current.send(JSON.stringify(message));
-        } else {
-            console.warn('WebSocket not connected. Message not sent:', message);
-        }
-    }, []);
 
     const reconnect = useCallback(() => {
         if (ws.current && ws.current.readyState !== WebSocket.CLOSED) {
