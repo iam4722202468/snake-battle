@@ -14,14 +14,6 @@ interface ServerSnake {
     size: number; // Track the player's size for scoring
     isBoosting: boolean; // Add boosting state
     selectedMapId?: string; // Add map selection
-    // Remove justTeleported flag
-    // activeTeleport can now potentially track multiple ongoing teleports if needed,
-    // but for now, we'll focus on the head entering a new one.
-    activeTeleport?: {
-        sourceId: number;
-        destId: number;
-        teleportedSegments: Set<number>; // Track which segment indices have teleported
-    };
     ws: ServerWebSocket<{ socketId: string }>;
 }
 
@@ -129,74 +121,7 @@ export class Game {
         let currentSegments = [...data.segments]; 
         const head = currentSegments[0];
 
-        // --- Teleportation Logic ---
-        if (this.currentMap === 'teleporters') {
-            const teleporters = MAPS.teleporters.teleporters;
-
-            // 1. Check if head is entering a NEW teleporter
-            const entryTeleporter = teleporters.find(t => t.position.x === head.x && t.position.y === head.y);
-            
-            if (entryTeleporter && (!player.activeTeleport || player.activeTeleport.sourceId !== entryTeleporter.id)) {
-                // Head entered a teleporter (or a different one than currently active)
-                const destination = teleporters.find(t => t.id === entryTeleporter.destination);
-                if (destination) {
-                    console.log(`TELEPORT TRIGGERED: Player ${socketId} head at (${head.x},${head.y}) entering teleporter ${entryTeleporter.id} to destination ${destination.id}`);
-                    
-                    // Immediately move the head segment
-                    currentSegments[0] = { x: destination.position.x, y: destination.position.y };
-                    
-                    // Start or replace active teleport tracking
-                    player.activeTeleport = {
-                        sourceId: entryTeleporter.id,
-                        destId: destination.id,
-                        teleportedSegments: new Set([0]) // Head (index 0) is now teleported
-                    };
-                    console.log(`Player ${socketId} head teleported from ${entryTeleporter.id} to ${destination.id} - new head at (${currentSegments[0].x},${currentSegments[0].y})`);
-                }
-            } 
-            // 2. Handle segments moving through an ACTIVE teleport
-            else if (player.activeTeleport) {
-                const sourceTeleporter = teleporters.find(t => t.id === player.activeTeleport!.sourceId);
-                const destTeleporter = teleporters.find(t => t.id === player.activeTeleport!.destId);
-
-                if (sourceTeleporter && destTeleporter) {
-                    const offsetX = destTeleporter.position.x - sourceTeleporter.position.x;
-                    const offsetY = destTeleporter.position.y - sourceTeleporter.position.y;
-                    let allSegmentsPastSource = true;
-
-                    for (let i = 0; i < currentSegments.length; i++) {
-                        const segment = currentSegments[i];
-                        const isAtSource = segment.x === sourceTeleporter.position.x && segment.y === sourceTeleporter.position.y;
-                        
-                        if (isAtSource && !player.activeTeleport.teleportedSegments.has(i)) {
-                            // Teleport this segment
-                            currentSegments[i] = { x: segment.x + offsetX, y: segment.y + offsetY };
-                            player.activeTeleport.teleportedSegments.add(i);
-                            console.log(`Player ${socketId}: Segment ${i} teleported from ${sourceTeleporter.id} to ${destTeleporter.id}`);
-                            allSegmentsPastSource = false; // Still processing this teleport
-                        } else if (isAtSource && player.activeTeleport.teleportedSegments.has(i)) {
-                            // Segment is at source but already marked teleported (shouldn't happen often, but indicates still processing)
-                            allSegmentsPastSource = false;
-                        } else if (!player.activeTeleport.teleportedSegments.has(i)) {
-                             // Segment is not at source and not yet teleported
-                             allSegmentsPastSource = false;
-                        }
-                    }
-
-                    // If all segments are accounted for (either teleported or never were at source), clear this active teleport
-                    if (allSegmentsPastSource || player.activeTeleport.teleportedSegments.size === currentSegments.length) {
-                         console.log(`Player ${socketId}: Completed or invalidated teleportation from ${sourceTeleporter.id}`);
-                         delete player.activeTeleport;
-                    }
-                } else {
-                    // Invalid state, clear active teleport
-                    delete player.activeTeleport;
-                }
-            }
-        }
-        // --- End Teleportation Logic ---
-
-        // Update player segments with the potentially modified positions
+        // Update player segments with the client's predicted positions
         player.segments = currentSegments; 
         const finalHead = player.segments[0]; // Use the final head position
 
@@ -206,10 +131,7 @@ export class Game {
             player.size++; 
             this.apple = this.getRandomPosition(); 
             this.broadcastAppleEat(socketId); 
-            // Note: Growth happens on the *next* client update based on server state
         } else {
-            // Ensure server size matches segment length if no apple eaten
-            // This might need adjustment if growth isn't immediate
             player.size = player.segments.length; 
         }
 
@@ -237,22 +159,6 @@ export class Game {
         if (player.segments.slice(1).some(segment => segment.x === head.x && segment.y === head.y)) {
             this.handlePlayerDeath(playerId, "self");
             return;
-        }
-        
-        // Check if player is in a tunnel (skip other collision checks if true)
-        if (this.currentMap === 'tunnels') {
-            const tunnels = MAPS.tunnels.tunnels;
-            const inTunnel = tunnels.some(tunnel => {
-                if (tunnel.direction === 'horizontal') {
-                    return head.y === tunnel.startY && head.x >= tunnel.startX && head.x <= tunnel.endX;
-                } else {
-                    return head.x === tunnel.startX && head.y >= tunnel.startY && head.y <= tunnel.endY;
-                }
-            });
-            
-            if (inTunnel) {
-                return; // Skip other player collision checks when in tunnel
-            }
         }
         
         // Collision with other players

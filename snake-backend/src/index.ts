@@ -4,7 +4,6 @@ console.log("Starting Snake Online Backend Server...");
 
 const game = new Game();
 
-// Generate unique IDs for connections
 let nextSocketId = 0;
 const generateSocketId = () => `player-${nextSocketId++}`;
 
@@ -36,7 +35,6 @@ const server = Bun.serve<{ socketId: string }>({
                 
                 switch (data.type) {
                     case 'position_update':
-                        // Handle position update from client
                         if (data.payload && Array.isArray(data.payload.segments) && data.payload.direction) {
                             game.handlePositionUpdate(socketId, {
                                 segments: data.payload.segments,
@@ -46,14 +44,12 @@ const server = Bun.serve<{ socketId: string }>({
                         break;
                         
                     case 'boost_update':
-                        // Handle boost state from client
                         if (data.payload && typeof data.payload.isBoosting === 'boolean') {
                             game.handleBoostUpdate(socketId, data.payload.isBoosting);
                         }
                         break;
                         
                     case 'ping':
-                        // Handle ping for latency measurement
                         ws.send(JSON.stringify({ 
                             type: 'pong', 
                             payload: { ts: data.payload?.ts } 
@@ -61,14 +57,12 @@ const server = Bun.serve<{ socketId: string }>({
                         break;
                         
                     case 'map_selection':
-                        // Handle map selection from client
                         if (data.payload && (typeof data.payload.mapId === 'string' || data.payload.mapId === null)) {
                             game.handleMapSelection(socketId, data.payload.mapId);
                         }
                         break;
                         
                     case 'game_mode_update':
-                        // Handle game mode update from client
                         if (data.payload && (data.payload.mode === 'selection' || data.payload.mode === 'playing')) {
                             game.handleGameModeChange(socketId, data.payload.mode);
                         }
