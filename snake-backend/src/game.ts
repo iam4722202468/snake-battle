@@ -13,6 +13,7 @@ interface ServerSnake {
     respawnEndTime: number;
     size: number; // Track the player's size for scoring
     isBoosting: boolean; // Add boosting state
+    selectedMapId?: string; // Add map selection
     ws: ServerWebSocket<{ socketId: string }>;
 }
 
@@ -25,12 +26,15 @@ export interface PlayerStateForClient {
     size: number;
     isRespawning: boolean; // Added
     isBoosting: boolean; // Add boosting state
+    selectedMapId?: string; // Add map selection
 }
 
+// Add a new interface for game state data
 export interface GameStateData {
-    players: PlayerStateForClient[]; // Use the new interface
+    players: PlayerStateForClient[];
     apple: Position;
     gridSize: number;
+    gameMode: 'selection' | 'playing'; // Add game mode
 }
 
 const GRID_SIZE = 20;
@@ -42,6 +46,7 @@ export class Game {
     private apple: Position;
     private broadcastIntervalId: Timer | null = null;
     private gridSize: number = GRID_SIZE;
+    private gameMode: 'selection' | 'playing' = 'selection'; // Default to selection mode
 
     constructor() {
         this.apple = this.getRandomPosition();
@@ -79,6 +84,9 @@ export class Game {
 
     // Handle position updates from clients
     handlePositionUpdate(socketId: string, data: { segments: Position[], direction: Direction }): void {
+        // Don't process position updates in selection mode
+        if (this.gameMode !== 'playing') return;
+
         const player = this.players.get(socketId);
         if (!player || player.isRespawning || data.segments.length === 0) return;
 
@@ -108,6 +116,9 @@ export class Game {
 
     // Check if player has hit a wall, itself, or another player
     private checkCollisions(playerId: string): void {
+        // Don't check collisions in selection mode
+        if (this.gameMode !== 'playing') return;
+
         const player = this.players.get(playerId);
         if (!player || player.isRespawning || player.segments.length === 0) return;
         
@@ -289,7 +300,6 @@ export class Game {
     
     // Get current game state
     private getGameState(): GameStateData {
-        // Include ALL players, but add the isRespawning flag
         const players = Array.from(this.players.values())
             .map(player => ({
                 id: player.id,
@@ -297,14 +307,16 @@ export class Game {
                 direction: player.direction,
                 hue: player.hue,
                 size: player.size,
-                isRespawning: player.isRespawning, // Include respawn status
-                isBoosting: player.isBoosting // Include boosting status
+                isRespawning: player.isRespawning,
+                isBoosting: player.isBoosting,
+                selectedMapId: player.selectedMapId
             }));
 
         return {
             players,
             apple: this.apple,
-            gridSize: this.gridSize
+            gridSize: this.gridSize,
+            gameMode: this.gameMode // Include game mode in state
         };
     }
     
@@ -344,5 +356,74 @@ export class Game {
         
         player.isBoosting = isBoosting;
         // No need to broadcast immediately, regular game_state will include it
+    }
+
+    // Add a method to handle map selection updates
+    handleMapSelection(socketId: string, mapId: string | null): void {
+        const player = this.players.get(socketId);
+        if (!player) return;
+        
+        // Update player's selected map
+        if (mapId) {
+            player.selectedMapId = mapId;
+        } else {
+            delete player.selectedMapId; // If null, remove the selection
+        }
+        
+        console.log(`Player ${socketId} selected map: ${mapId || 'none'}`);
+    }
+
+    // Add method to handle game mode changes
+    handleGameModeChange(socketId: string, mode: 'selection' | 'playing'): void {
+        const player = this.players.get(socketId);
+        if (!player) return;
+
+        // Update the game mode for everyone
+        this.gameMode = mode;
+        
+        console.log(`Player ${socketId} changed game mode to: ${mode}`);
+        
+        // If switching to playing mode, reset any players who were previously respawning
+        if (mode === 'playing') {
+            this.players.forEach((player, id) => {
+                if (player.isRespawning) {
+                    // Give them a new position and reset respawning state
+                    const startPosition = this.getRandomPosition();
+                    player.isRespawning = false;
+                    player.respawnEndTime = 0;
+                    player.segments = [startPosition];
+                    player.size = 1;
+                    
+                    // Notify about respawn if connected
+                    if (player.ws.readyState === WebSocket.OPEN) {
+                        player.ws.send(JSON.stringify({
+                            type: 'respawn',
+                            payload: {
+                                playerId: id,
+                                position: startPosition,
+                                direction: 'right'
+                            }
+                        }));
+                    }
+                }
+            });
+        }
+        
+        // Broadcast the mode change to all players immediately
+        this.broadcastGameMode();
+    }
+    
+    // Broadcast game mode to all players
+    private broadcastGameMode(): void {
+        const message = JSON.stringify({
+            type: 'game_mode_update',
+            payload: { mode: this.gameMode }
+        });
+        
+        this.players.forEach(player => {
+            if (player.ws.readyState === WebSocket.OPEN) {
+                player.ws.send(message);
+            }
+        });
     }
 }

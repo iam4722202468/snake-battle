@@ -5,6 +5,8 @@ import Snake from './Snake';
 import Apple from './Apple';
 import BoostMeter from './BoostMeter';
 import { useWebSocket } from '../hooks/useWebSocket';
+import MapSelector from './MapSelector';
+import { Player } from '../types/gameTypes';
 
 // Update Player interface to include boosting
 interface Player {
@@ -50,6 +52,11 @@ const Game: React.FC = () => {
     const [boostAmount, setBoostAmount] = useState<number>(BOOST_MAX);
     const [canBoost, setCanBoost] = useState<boolean>(true); // To prevent boost when empty
 
+    // Change showMapSelector to gameMode for clarity and server sync
+    const [gameMode, setGameMode] = useState<'selection' | 'playing'>('selection');
+
+    const [selectedMapId, setSelectedMapId] = useState<string | null>(null);
+
     // Callback to send position updates to the server
     const handlePositionUpdate = useCallback((segments: Position[], direction: Direction) => {
         if (!connected || isRespawning) return;
@@ -68,15 +75,45 @@ const Game: React.FC = () => {
         });
     }, [connected, isRespawning, sendMessage]);
 
+    // New callback to handle map selection
+    const handleMapSelection = useCallback((mapId: string) => {
+        setSelectedMapId(mapId);
+        
+        if (connected) {
+            sendMessage({
+                type: 'map_selection',
+                payload: { mapId }
+            });
+        }
+    }, [connected, sendMessage]);
+
+    // New function to send game mode update to server
+    const sendGameModeUpdate = useCallback((mode: 'selection' | 'playing') => {
+        if (!connected) return;
+        
+        console.log(`Sending game mode update: ${mode}`);
+        sendMessage({
+            type: 'game_mode_update',
+            payload: { mode }
+        });
+    }, [connected, sendMessage]);
+    
+    // Replace toggleMapSelector with specific mode change functions
+    const switchToMapSelection = useCallback(() => {
+        sendGameModeUpdate('selection');
+    }, [sendGameModeUpdate]);
+    
+    const startGame = useCallback(() => {
+        sendGameModeUpdate('playing');
+    }, [sendGameModeUpdate]);
+
     // Game loop hook - Pass multiplayer props
     const {
         segments,
         direction,
         displayDirection, // Use this for UI display
         addInput,
-        reset: resetGame, // Keep reset if needed, but server controls state
         setSegments, // <-- Add this to allow external segment updates
-        // Removed appleEaten, gameOver
     } = useClientGameLoop({
         gridSize,
         apple,
@@ -87,6 +124,7 @@ const Game: React.FC = () => {
         onPositionUpdate: handlePositionUpdate, // Pass callback
         isBoosting, // Pass boosting state
         tickMultiplier: 1.5, // 1.5x speed when boosting
+        gameMode, // Pass the game mode
     });
 
     // Track if we've synced local state to server state after connect
@@ -196,6 +234,19 @@ const Game: React.FC = () => {
                         } else {
                             console.log("Processing 'game_state' but clientId is not set yet. Clearing other players.");
                         }
+
+                        // Find self in server state to sync map selection
+                        if (clientId) {
+                            const selfData = data.payload.players.find(p => p.id === clientId);
+                            if (selfData && selfData.selectedMapId && selectedMapId !== selfData.selectedMapId) {
+                                setSelectedMapId(selfData.selectedMapId);
+                            }
+                        }
+                    }
+                    // Also sync game mode from server state
+                    if (data.payload.gameMode && data.payload.gameMode !== gameMode) {
+                        console.log(`Setting game mode from server: ${data.payload.gameMode}`);
+                        setGameMode(data.payload.gameMode);
                     }
                     break;
 
@@ -259,6 +310,14 @@ const Game: React.FC = () => {
                     }
                     break;
 
+                // Add handling for specific game mode updates
+                case 'game_mode_update':
+                    if (data.payload && data.payload.mode) {
+                        console.log(`Received game mode update: ${data.payload.mode}`);
+                        setGameMode(data.payload.mode);
+                    }
+                    break;
+
                 default:
                     // Log unhandled message types
                     console.log(`Unhandled message type: ${data.type}`);
@@ -268,7 +327,7 @@ const Game: React.FC = () => {
             console.error("Error processing server message:", error, "Raw data:", lastMessage?.data);
         }
         // Dependencies: Added setIsRespawning, isRespawning
-    }, [lastMessage, clientId, setSegments, setScore, isRespawning, setIsRespawning]);
+    }, [lastMessage, clientId, setSegments, setScore, isRespawning, setIsRespawning, selectedMapId, gameMode]);
 
     // Add a separate effect to log clientId changes
     useEffect(() => {
@@ -334,7 +393,8 @@ const Game: React.FC = () => {
         <div className="flex flex-col items-center">
             {/* Title */}
             <h1 className="text-3xl font-bold mb-2 text-gray-800 dark:text-gray-200">Snake Online</h1>
-            {/* Show Player ID - Add log */}
+            
+            {/* Show Player ID */}
             {clientId ? (
                 <div className="mb-1 text-xs text-gray-500 dark:text-gray-400">
                     Your Player ID: <span className="font-mono">{clientId}</span>
@@ -344,6 +404,7 @@ const Game: React.FC = () => {
                     Player ID: Not assigned yet
                  </div>
             )}
+            
             {/* Connection Status & Latency */}
             <div className="flex items-center gap-2 mb-1 text-xs">
                 <span className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500'}`}></span>
@@ -359,86 +420,118 @@ const Game: React.FC = () => {
                 )}
             </div>
 
-            {/* Game stats */}
-            <div className="mb-2 flex items-center gap-4 text-sm">
-                {/* Score is now directly from server state */}
-                <p className="font-bold">Score: {score}</p>
-                {/* Length display still uses local prediction for smoothness */}
-                <p>Length: {!isRespawning && segments.length > 0 ? segments.length : 0}</p>
-                <p>Input: <span className="font-mono uppercase">{displayDirection}</span></p>
-                {/* Player count uses the total count from server state */}
-                <p>Players: {totalPlayers}</p>
-                
-                {/* Boost meter */}
-                <div className="flex items-center gap-2">
-                    <span className={`text-xs ${isBoosting ? 'text-red-500 font-bold' : ''}`}>
-                        BOOST
-                    </span>
-                    <BoostMeter boostAmount={boostAmount} isBoosting={isBoosting} />
-                </div>
-            </div>
+            {/* Only show the map selection button when in-game */}
+            {clientId && gameMode === 'playing' && (
+                <button 
+                    onClick={switchToMapSelection}
+                    className="mb-4 px-3 py-1 bg-blue-500 text-white text-sm rounded hover:bg-blue-600"
+                >
+                    Select Map
+                </button>
+            )}
 
-            {/* Game board */}
-            <div
-                className="relative border-2 border-gray-500 dark:border-gray-700 shadow-lg overflow-hidden game-grid-bg"
-                style={{
-                    width: gameBoardSize,
-                    height: gameBoardSize,
-                    maxWidth: '600px',
-                    maxHeight: '600px',
-                }}
-            >
-                {/* Connection Overlay */}
-                 {!connected && readyState !== WebSocket.OPEN && (
-                    <div className="absolute inset-0 flex items-center justify-center bg-black/70 z-30 text-white font-bold">
-                        {readyState === WebSocket.CONNECTING ? 'Connecting...' : 'Disconnected'}
+            {/* Show Map Selector or Game Board based on server game mode */}
+            {gameMode === 'selection' ? (
+                <MapSelector 
+                    clientId={clientId}
+                    players={[...otherPlayers, ...(clientId ? [{
+                        id: clientId,
+                        segments,
+                        direction,
+                        hue: playerHue,
+                        size: score,
+                        isRespawning,
+                        isBoosting,
+                        selectedMapId
+                    }] : [])]}
+                    selectedMapId={selectedMapId}
+                    onSelectMap={handleMapSelection}
+                    onPlayNow={startGame} // Changed to use the new function
+                />
+            ) : (
+                <>
+                    {/* Game stats */}
+                    <div className="mb-2 flex items-center gap-4 text-sm">
+                        {/* Score is now directly from server state */}
+                        <p className="font-bold">Score: {score}</p>
+                        {/* Length display still uses local prediction for smoothness */}
+                        <p>Length: {!isRespawning && segments.length > 0 ? segments.length : 0}</p>
+                        <p>Input: <span className="font-mono uppercase">{displayDirection}</span></p>
+                        {/* Player count uses the total count from server state */}
+                        <p>Players: {totalPlayers}</p>
+                        
+                        {/* Boost meter */}
+                        <div className="flex items-center gap-2">
+                            <span className={`text-xs ${isBoosting ? 'text-red-500 font-bold' : ''}`}>
+                                BOOST
+                            </span>
+                            <BoostMeter boostAmount={boostAmount} isBoosting={isBoosting} />
+                        </div>
                     </div>
-                )}
 
-                {/* Apple */}
-                <Apple position={apple} gridSize={gridSize} />
+                    {/* Game board */}
+                    <div
+                        className="relative border-2 border-gray-500 dark:border-gray-700 shadow-lg overflow-hidden game-grid-bg"
+                        style={{
+                            width: gameBoardSize,
+                            height: gameBoardSize,
+                            maxWidth: '600px',
+                            maxHeight: '600px',
+                        }}
+                    >
+                        {/* Connection Overlay */}
+                         {!connected && readyState !== WebSocket.OPEN && (
+                            <div className="absolute inset-0 flex items-center justify-center bg-black/70 z-30 text-white font-bold">
+                                {readyState === WebSocket.CONNECTING ? 'Connecting...' : 'Disconnected'}
+                            </div>
+                        )}
 
-                {/* Other players */}
-                {otherPlayers.map(player => (
-                    <Snake
-                        key={player.id}
-                        segments={player.segments}
-                        hue={player.hue}
-                        gridSize={gridSize}
-                        isBoosting={player.isBoosting}
-                    />
-                ))}
+                        {/* Apple */}
+                        <Apple position={apple} gridSize={gridSize} />
 
-                {/* Current player's snake (only render if not respawning) */}
-                {!isRespawning && segments.length > 0 && (
-                    <Snake
-                        segments={segments}
-                        hue={playerHue} // Use server-assigned hue instead of hardcoded 120
-                        gridSize={gridSize}
-                        isBoosting={isBoosting}
-                    />
-                )}
+                        {/* Other players */}
+                        {otherPlayers.map(player => (
+                            <Snake
+                                key={player.id}
+                                segments={player.segments}
+                                hue={player.hue}
+                                gridSize={gridSize}
+                                isBoosting={player.isBoosting}
+                            />
+                        ))}
 
-                {/* Respawn overlay */}
-                {isRespawning && (
-                    <div className="absolute inset-0 flex flex-col items-center justify-center text-white bg-black/60 text-xl font-bold z-20">
-                        <div>You died!</div>
-                        {/* Display reason? data.payload.reason */}
-                        <div className="text-2xl mt-2">Score: {score}</div>
-                        {respawnCountdown !== null && respawnCountdown > 0 && (
-                            <>
-                                <div className="text-7xl mt-4 font-mono">{respawnCountdown}</div>
-                                <div className="text-lg mt-4">Respawning...</div>
-                            </>
+                        {/* Current player's snake (only render if not respawning) */}
+                        {!isRespawning && segments.length > 0 && (
+                            <Snake
+                                segments={segments}
+                                hue={playerHue} // Use server-assigned hue instead of hardcoded 120
+                                gridSize={gridSize}
+                                isBoosting={isBoosting}
+                            />
+                        )}
+
+                        {/* Respawn overlay */}
+                        {isRespawning && (
+                            <div className="absolute inset-0 flex flex-col items-center justify-center text-white bg-black/60 text-xl font-bold z-20">
+                                <div>You died!</div>
+                                {/* Display reason? data.payload.reason */}
+                                <div className="text-2xl mt-2">Score: {score}</div>
+                                {respawnCountdown !== null && respawnCountdown > 0 && (
+                                    <>
+                                        <div className="text-7xl mt-4 font-mono">{respawnCountdown}</div>
+                                        <div className="text-lg mt-4">Respawning...</div>
+                                    </>
+                                )}
+                            </div>
                         )}
                     </div>
-                )}
-            </div>
 
-            {/* Controls help */}
-            <div className="mt-4 text-sm text-gray-600 dark:text-gray-400">
-                Use arrow keys or WASD to control the snake. Press SPACE to boost!
-            </div>
+                    {/* Controls help */}
+                    <div className="mt-4 text-sm text-gray-600 dark:text-gray-400">
+                        Use arrow keys or WASD to control the snake. Press SPACE to boost!
+                    </div>
+                </>
+            )}
         </div>
     );
 };

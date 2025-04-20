@@ -60,6 +60,20 @@ const server = Bun.serve<{ socketId: string }>({
                         }));
                         break;
                         
+                    case 'map_selection':
+                        // Handle map selection from client
+                        if (data.payload && (typeof data.payload.mapId === 'string' || data.payload.mapId === null)) {
+                            game.handleMapSelection(socketId, data.payload.mapId);
+                        }
+                        break;
+                        
+                    case 'game_mode_update':
+                        // Handle game mode update from client
+                        if (data.payload && (data.payload.mode === 'selection' || data.payload.mode === 'playing')) {
+                            game.handleGameModeChange(socketId, data.payload.mode);
+                        }
+                        break;
+                        
                     default:
                         break;
                 }

@@ -13,6 +13,7 @@ interface UseClientGameLoopProps {
     onPositionUpdate?: (segments: Position[], direction: Direction) => void;
     isBoosting: boolean;
     tickMultiplier?: number;
+    gameMode: 'selection' | 'playing'; // Add game mode prop
 }
 
 interface ClientGameLoopState {
@@ -33,6 +34,7 @@ export const useClientGameLoop = ({
     onPositionUpdate,
     isBoosting = false,
     tickMultiplier = 1.5,
+    gameMode = 'playing', // Add default
 }: UseClientGameLoopProps): ClientGameLoopState => {
     const [segments, setSegments] = useState<Position[]>([{ x: 10, y: 10 }]);
     const [direction, setDirection] = useState<Direction>('right');
@@ -69,7 +71,8 @@ export const useClientGameLoop = ({
 
     // Handle user input for direction changes
     const addInput = useCallback((newDirection: Direction) => {
-        if (isRespawning) return;
+        // Don't process inputs in selection mode
+        if (isRespawning || gameMode !== 'playing') return;
 
         const lastQueuedDirection = inputBufferRef.current.length > 0
             ? inputBufferRef.current[inputBufferRef.current.length - 1]
@@ -89,11 +92,12 @@ export const useClientGameLoop = ({
             inputBufferRef.current.push(newDirection);
             setDisplayDirection(newDirection);
         }
-    }, [isRespawning, segments.length]);
+    }, [isRespawning, segments.length, gameMode]);
 
     // Game loop using requestAnimationFrame for smoother performance
     useEffect(() => {
-        if (isRespawning) {
+        // Only run game loop if in playing mode and not respawning
+        if (isRespawning || gameMode !== 'playing') {
             if (animationFrameIdRef.current) {
                 cancelAnimationFrame(animationFrameIdRef.current);
                 animationFrameIdRef.current = null;
@@ -172,7 +176,7 @@ export const useClientGameLoop = ({
                 animationFrameIdRef.current = null;
             }
         };
-    }, [isRespawning, gridSize, tickMultiplier]);
+    }, [isRespawning, gridSize, tickMultiplier, gameMode]);
 
     return {
         segments,
