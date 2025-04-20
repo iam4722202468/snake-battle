@@ -37,7 +37,7 @@ export interface GameState {
 
 // --- Constants ---
 const GRID_SIZE = 20;
-const TICK_RATE = 75; // Decreased tick rate (milliseconds) - e.g., ~13.3 FPS
+const TICK_RATE = 150; // Reverted tick rate (milliseconds)
 const RESPAWN_DELAY = 3000; // Milliseconds (3 seconds)
 
 // --- Game Class ---
