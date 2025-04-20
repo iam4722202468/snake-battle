@@ -39,8 +39,6 @@ export const useClientGameLoop = ({
     ]);
     const [direction, setDirection] = useState<Direction>('right');
     const [displayDirection, setDisplayDirection] = useState<Direction>('right'); // For UI display only
-    // Removed appleEaten state
-    // Removed gameOver state
 
     // Refs for internal state
     const currentDirectionRef = useRef<Direction>('right');
@@ -54,7 +52,6 @@ export const useClientGameLoop = ({
         onPositionUpdateRef.current = onPositionUpdate;
     }, [onPositionUpdate]);
 
-    // Keep the apple ref updated
     useEffect(() => {
         appleRef.current = apple;
     }, [apple]);
@@ -64,7 +61,6 @@ export const useClientGameLoop = ({
         currentDirectionRef.current = direction;
     }, [direction]);
 
-    // Reset state based on initialPosition (e.g., after respawn)
     useEffect(() => {
         if (initialPosition) {
             console.log("Resetting to initial position:", initialPosition);
@@ -77,9 +73,7 @@ export const useClientGameLoop = ({
         }
     }, [initialPosition]);
 
-    // Reset function (might not be strictly needed externally anymore)
     const reset = useCallback(() => {
-        // This could be used internally if needed, but server dictates respawn state
         setSegments([{ x: 10, y: 10 }]); // Example reset position
         setDirection('right');
         setDisplayDirection('right');
@@ -87,9 +81,7 @@ export const useClientGameLoop = ({
         inputBufferRef.current = [];
     }, []);
 
-    // Handle direction input - Add to buffer
     const addInput = useCallback((newDirection: Direction) => {
-        // Don't accept input while respawning
         if (isRespawning) return;
 
         const lastQueuedDirection = inputBufferRef.current.length > 0
@@ -112,9 +104,7 @@ export const useClientGameLoop = ({
         }
     }, [isRespawning, segments.length]); // Added isRespawning dependency
 
-    // Game loop - main game mechanics
     useEffect(() => {
-        // Stop loop if respawning
         if (isRespawning) {
             if (gameLoopIntervalRef.current) {
                 clearInterval(gameLoopIntervalRef.current);
@@ -151,10 +141,6 @@ export const useClientGameLoop = ({
                         case 'right': newHead.x += 1; break;
                     }
 
-                    // Wrap around grid boundaries (client-side prediction)
-                    newHead.x = (newHead.x + gridSize) % gridSize;
-                    newHead.y = (newHead.y + gridSize) % gridSize;
-
                     // Client-side prediction of eating apple
                     const currentApple = appleRef.current; // Get latest apple position from ref
                     const ateApple = newHead.x === currentApple.x && newHead.y === currentApple.y;
@@ -165,7 +151,6 @@ export const useClientGameLoop = ({
                     if (!ateApple) {
                         newSegments = newSegments.slice(0, -1);
                     }
-                    // Server will confirm apple eating and send new apple position
 
                     // Send updated position to server via callback ref
                     if (onPositionUpdateRef.current) {

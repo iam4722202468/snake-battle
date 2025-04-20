@@ -38,6 +38,7 @@ const Game: React.FC = () => {
     const [isRespawning, setIsRespawning] = useState<boolean>(false); // Controlled by server messages
     const [initialPosition, setInitialPosition] = useState<Position | null>(null); // For respawn
     const [totalPlayers, setTotalPlayers] = useState<number>(0); // State for total player count
+    const [playerHue, setPlayerHue] = useState<number>(120); // Default to green until we get server value
 
     // Callback to send position updates to the server
     const handlePositionUpdate = useCallback((segments: Position[], direction: Direction) => {
@@ -116,6 +117,8 @@ const Game: React.FC = () => {
                                 setSegments(selfData.segments);
                                 hasSyncedRef.current = true;
                                 setScore(selfData.size || 1);
+                                // Also store the player's server-assigned hue
+                                setPlayerHue(selfData.hue);
                             } else if (selfData) {
                                 // Update score only if it differs? Or always? Let's always update for now.
                                 setScore(selfData.size || 1);
@@ -127,6 +130,8 @@ const Game: React.FC = () => {
                                 } else if (!selfData.isRespawning && isRespawning) {
                                      // This case handled by 'respawn' message normally
                                 }
+                                // Make sure we always have the latest hue
+                                setPlayerHue(selfData.hue);
                             } else if (!selfData && hasSyncedRef.current) {
                                 // If selfData is missing after sync (e.g., during respawn),
                                 // it implies we are respawning according to the server.
@@ -325,7 +330,7 @@ const Game: React.FC = () => {
                 {!isRespawning && segments.length > 0 && (
                     <Snake
                         segments={segments}
-                        hue={120} // Green for the player
+                        hue={playerHue} // Use server-assigned hue instead of hardcoded 120
                         gridSize={gridSize}
                     />
                 )}
