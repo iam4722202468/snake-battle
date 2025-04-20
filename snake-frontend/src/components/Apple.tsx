@@ -15,7 +15,6 @@ const Apple: React.FC<AppleProps> = ({ position, gridSize }) => {
         objectFit: 'contain',
         imageRendering: 'pixelated',
     };
-
     return <img src="/assets/coin.png" alt="Coin" className="absolute" style={style} />;
 };
 

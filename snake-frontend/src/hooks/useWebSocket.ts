@@ -1,92 +1,145 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 
-const WEBSOCKET_URL = process.env.NEXT_PUBLIC_WEBSOCKET_URL || 'ws://192.168.1.11:8080'; // Use environment variable or default
-const PING_INTERVAL = 5000; // Send a ping every 5 seconds
+const WEBSOCKET_URL = process.env.NEXT_PUBLIC_WEBSOCKET_URL || 'ws://localhost:8080';
+const PING_INTERVAL = 5000;
+const RECONNECT_DELAY = 5000;
 
 interface WebSocketHook {
     sendMessage: (message: any) => void;
     lastMessage: MessageEvent | null;
     readyState: number;
-    latency: number; // Added latency tracking
+    latency: number;
+    connected: boolean;
+    reconnect: () => void;
 }
 
 export function useWebSocket(): WebSocketHook {
     const [lastMessage, setLastMessage] = useState<MessageEvent | null>(null);
     const [readyState, setReadyState] = useState<number>(WebSocket.CONNECTING);
-    const [latency, setLatency] = useState<number>(0); // Track round-trip time
+    const [latency, setLatency] = useState<number>(0);
     const ws = useRef<WebSocket | null>(null);
     const pingTimeRef = useRef<number | null>(null);
     const pingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+    const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-    useEffect(() => {
-        if (!ws.current) {
-            ws.current = new WebSocket(WEBSOCKET_URL);
-
-            ws.current.onopen = () => {
-                console.log('WebSocket Connected');
-                setReadyState(WebSocket.OPEN);
-                
-                // Start ping interval
-                pingIntervalRef.current = setInterval(() => {
-                    if (ws.current?.readyState === WebSocket.OPEN) {
-                        pingTimeRef.current = Date.now();
-                        ws.current.send(JSON.stringify({ type: 'ping' }));
-                    }
-                }, PING_INTERVAL);
-            };
-
-            ws.current.onclose = () => {
-                console.log('WebSocket Disconnected');
-                setReadyState(WebSocket.CLOSED);
-                ws.current = null;
-                if (pingIntervalRef.current) {
-                    clearInterval(pingIntervalRef.current);
-                    pingIntervalRef.current = null;
-                }
-            };
-
-            ws.current.onerror = (error) => {
-                console.error('WebSocket Error:', error);
-                setReadyState(WebSocket.CLOSED);
-            };
-
-            ws.current.onmessage = (event) => {
-                try {
-                    const data = JSON.parse(event.data);
-                    // Handle pong message for latency calculation
-                    if (data.type === 'pong' && pingTimeRef.current) {
-                        const rtt = Date.now() - pingTimeRef.current;
-                        setLatency(rtt);
-                        pingTimeRef.current = null;
-                    }
-                } catch (e) {
-                    // Not a JSON message or not a pong, continue
-                }
-                
-                setLastMessage(event);
-            };
+    const connect = useCallback(() => {
+        if (reconnectTimeoutRef.current) {
+            clearTimeout(reconnectTimeoutRef.current);
+            reconnectTimeoutRef.current = null;
         }
 
-        // Cleanup function
-        return () => {
-            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.close();
+        if (ws.current && ws.current.readyState !== WebSocket.CLOSED) {
+            console.log("WebSocket already connecting/open.");
+            return;
+        }
+
+        console.log(`Attempting to connect to ${WEBSOCKET_URL}...`);
+        setReadyState(WebSocket.CONNECTING);
+
+        if (ws.current) {
+            ws.current.onopen = null;
+            ws.current.onclose = null;
+            ws.current.onerror = null;
+            ws.current.onmessage = null;
+        }
+
+        ws.current = new WebSocket(WEBSOCKET_URL);
+
+        ws.current.onopen = () => {
+            console.log('WebSocket Connected');
+            setReadyState(WebSocket.OPEN);
+            if (reconnectTimeoutRef.current) {
+                clearTimeout(reconnectTimeoutRef.current);
+                reconnectTimeoutRef.current = null;
             }
+
+            if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
+            pingIntervalRef.current = setInterval(() => {
+                if (ws.current?.readyState === WebSocket.OPEN) {
+                    pingTimeRef.current = Date.now();
+                    sendMessage({ type: 'ping', payload: { ts: pingTimeRef.current } });
+                }
+            }, PING_INTERVAL);
+        };
+
+        ws.current.onclose = (event) => {
+            console.log(`WebSocket Disconnected (Code: ${event.code}, Reason: ${event.reason})`);
+            setReadyState(WebSocket.CLOSED);
             ws.current = null;
             if (pingIntervalRef.current) {
                 clearInterval(pingIntervalRef.current);
                 pingIntervalRef.current = null;
             }
+            if (event.code !== 1000 && !reconnectTimeoutRef.current) {
+                 console.log(`Scheduling reconnect in ${RECONNECT_DELAY / 1000} seconds...`);
+                 reconnectTimeoutRef.current = setTimeout(connect, RECONNECT_DELAY);
+            }
         };
-    }, []); // Empty dependency array ensures this runs only once on mount
+
+        ws.current.onerror = (error) => {
+            console.error('WebSocket Error:', error);
+             if (pingIntervalRef.current) {
+                clearInterval(pingIntervalRef.current);
+                pingIntervalRef.current = null;
+            }
+        };
+
+        ws.current.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                if (data.type === 'pong' && data.payload?.ts && pingTimeRef.current) {
+                    const rtt = Date.now() - data.payload.ts;
+                    setLatency(rtt);
+                    pingTimeRef.current = null;
+                }
+            } catch (e) {
+            }
+            setLastMessage(event);
+        };
+    }, []);
+
+    useEffect(() => {
+        connect();
+
+        return () => {
+            if (reconnectTimeoutRef.current) {
+                clearTimeout(reconnectTimeoutRef.current);
+            }
+            if (pingIntervalRef.current) {
+                clearInterval(pingIntervalRef.current);
+            }
+            if (ws.current) {
+                console.log("Closing WebSocket connection on unmount.");
+                ws.current.onclose = null;
+                ws.current.close(1000);
+            }
+            ws.current = null;
+        };
+    }, [connect]);
 
     const sendMessage = useCallback((message: any) => {
         if (ws.current && ws.current.readyState === WebSocket.OPEN) {
             ws.current.send(JSON.stringify(message));
         } else {
-            console.log('WebSocket not connected.');
+            console.warn('WebSocket not connected. Message not sent:', message);
         }
     }, []);
 
-    return { sendMessage, lastMessage, readyState, latency };
+    const reconnect = useCallback(() => {
+        if (ws.current && ws.current.readyState !== WebSocket.CLOSED) {
+            console.log("Closing existing connection before manual reconnect...");
+            ws.current.onclose = null;
+            ws.current.close(1000, "Manual reconnect requested");
+        }
+        if (reconnectTimeoutRef.current) {
+            clearTimeout(reconnectTimeoutRef.current);
+            reconnectTimeoutRef.current = null;
+        }
+        console.log("Manual reconnect initiated.");
+        connect();
+    }, [connect]);
+
+    const connected = readyState === WebSocket.OPEN;
+
+    return { sendMessage, lastMessage, readyState, latency, connected, reconnect };
 }

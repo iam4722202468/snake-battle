@@ -1,8 +1,9 @@
-import Game from "../components/Game"; // Import the Game component
+import Game from "../components/Game";
 
 export default function Home() {
   return (
-    // Removed the outer div with grid layout for simplicity, Game component handles its layout
-    <Game />
+    <div className="flex flex-row items-start justify-center min-h-screen p-4 gap-4">
+      <Game />
+    </div>
   );
 }

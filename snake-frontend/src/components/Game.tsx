@@ -1,498 +1,203 @@
 'use client';
-
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { useWebSocket } from '../hooks/useWebSocket';
+import React, { useEffect, useState, useRef } from 'react';
+import useClientGameLoop, { Direction } from '../hooks/useClientGameLoop';
 import Snake from './Snake';
 import Apple from './Apple';
 
-// --- Interfaces ---
-interface Position {
-    x: number;
-    y: number;
-}
-interface GameStateSnake {
-    id: string;
-    segments: Position[];
-    hue: number; // Added
-    isRespawning: boolean;
-    respawnEndTime: number | null;
-}
-interface GameState {
-    snakes: GameStateSnake[];
-    apple: Position;
-    gridSize: number;
-}
+interface Position { x: number; y: number; }
 
-// --- Constants ---
-const GRID_SIZE = 20; // Default or fallback grid size
-const CLIENT_TICK_RATE = 150; // Reverted tick rate - Match server
-const RESPAWN_DELAY = 3000; // ms - Client-side constant, MUST match server
-const MAX_PREDICTION_BUFFER = 8; // Maximum number of moves to predict ahead
-const RECONCILIATION_THRESHOLD = 2; // How many segments can be off before hard reconciliation
+const DEFAULT_GRID_SIZE = 20;
+const CLIENT_TICK_RATE = 200; // Increased from 100ms to 200ms for slower movement
+const RESPAWN_COUNTDOWN = 3; // Seconds before restart after death
 
 const Game: React.FC = () => {
-    const { sendMessage, lastMessage, readyState, latency } = useWebSocket();
-    const [gameState, setGameState] = useState<GameState | null>(null);
-    const [clientId, setClientId] = useState<string | null>(null);
-
-    // --- Client-side Prediction State ---
-    const [predictedSegments, setPredictedSegments] = useState<Position[]>([]);
-    const [predictedDirection, setPredictedDirection] = useState<'up' | 'down' | 'left' | 'right'>('right');
-    const [queuedDirection, setQueuedDirection] = useState<'up' | 'down' | 'left' | 'right' | null>(null); // Added input queue
-    const [isClientRespawning, setIsClientRespawning] = useState<boolean>(false); // Added state for respawn visual
-    const [respawnEndTime, setRespawnEndTime] = useState<number | null>(null); // Added state for timer end
-    const [respawnCountdown, setRespawnCountdown] = useState<number | null>(null); // Added state for countdown display
-    const lastUpdateTimeRef = useRef<number>(0);
-    const gameLoopRef = useRef<number | null>(null);
-    const predictedDeathRef = useRef<boolean>(false); // Ref to track local death prediction
-    const inputHistoryRef = useRef<Array<{direction: string, timestamp: number}>>([]);
-    const lastServerUpdateRef = useRef<number>(Date.now());
-    // Keep a more robust queue of directions to process
-    const directionQueueRef = useRef<Array<'up' | 'down' | 'left' | 'right'>>([]);
-
-    // --- Helper function for comparing positions ---
-    const arePositionsEqual = (pos1: Position, pos2: Position): boolean => {
-        return pos1.x === pos2.x && pos1.y === pos2.y;
-    };
-
-    // --- Helper function to measure segment difference ---
-    const calculateSegmentDifference = (predicted: Position[], server: Position[]): number => {
-        const minLength = Math.min(predicted.length, server.length);
-        let differences = 0;
-        
-        // Check position differences in common segments
-        for (let i = 0; i < minLength; i++) {
-            if (!arePositionsEqual(predicted[i], server[i])) {
-                differences++;
-            }
-        }
-        
-        // Add the length difference
-        differences += Math.abs(predicted.length - server.length);
-        
-        return differences;
-    };
-
-    // --- Server Message Handling & Reconciliation ---
+    // Game state
+    const [gridSize] = useState<number>(DEFAULT_GRID_SIZE);
+    const [apple, setApple] = useState<Position>({ x: 10, y: 10 });
+    const [score, setScore] = useState<number>(0);
+    const [respawnCountdown, setRespawnCountdown] = useState<number | null>(null);
+    const countdownIntervalRef = useRef<NodeJS.Timeout | null>(null);
+    
+    // Game loop hook
+    const {
+        segments,
+        direction, // Last applied direction
+        requestedDirection, // Last requested direction
+        addInput,
+        reset: resetGame,
+        appleEaten,
+        gameOver
+    } = useClientGameLoop({
+        gridSize,
+        apple,
+        tickRate: CLIENT_TICK_RATE,
+    });
+    
+    // Start countdown when game over is detected
     useEffect(() => {
-        if (lastMessage !== null) {
-            try {
-                const data = JSON.parse(lastMessage.data);
+        // Clear any existing interval when gameOver state changes
+        if (countdownIntervalRef.current) {
+            clearInterval(countdownIntervalRef.current);
+            countdownIntervalRef.current = null;
+        }
 
-                if (data.type === 'assignId') {
-                    const newClientId = data.payload.id;
-                    setClientId(newClientId);
-                    console.log("Assigned Client ID:", newClientId);
-                    // Initial state often comes with assignment or shortly after
-                } else if (data.type === 'gameState') {
-                    lastServerUpdateRef.current = Date.now();
-                    const serverState: GameState = data.payload;
-                    setGameState(serverState); // Update overall game state
+        if (gameOver) {
+            // Start the countdown only if it's not already running
+            setRespawnCountdown(RESPAWN_COUNTDOWN); // Set initial countdown value
 
-                    // --- Improved Reconciliation ---
-                    if (clientId) {
-                        const clientSnakeServerState = serverState.snakes.find(s => s.id === clientId);
-                        if (clientSnakeServerState) {
-                            // Check respawn status FIRST
-                            if (clientSnakeServerState.isRespawning) {
-                                if (!isClientRespawning) { // Log only when state changes to true
-                                    console.log(`[Client ${clientId}] Started respawning.`);
-                                    setIsClientRespawning(true);
-                                    setRespawnEndTime(clientSnakeServerState.respawnEndTime); // Store end time
-                                    setQueuedDirection(null); // Clear queue on respawn start
-                                    inputHistoryRef.current = []; // Clear input history
-                                }
-                                // Server confirmed, so clear the local prediction flag
-                                predictedDeathRef.current = false;
-                                setPredictedSegments([]); // Clear local prediction while respawning
-                            } else {
-                                // Not respawning, update state and reconcile segments
-                                if (isClientRespawning && !predictedDeathRef.current) { // Log only when state changes to false
-                                     console.log(`[Client ${clientId}] Finished respawning.`);
-                                     setIsClientRespawning(false);
-                                     setRespawnEndTime(null); // Clear end time
-                                     setRespawnCountdown(null); // Clear countdown display
-                                     setQueuedDirection(null); // Clear queue on respawn end
-                                     inputHistoryRef.current = []; // Clear input history
-                                     setPredictedSegments(clientSnakeServerState.segments);
-                                } else if (predictedDeathRef.current) {
-                                    // We predicted death, but server hasn't confirmed yet. Keep waiting.
-                                    console.log(`[Client ${clientId}] Waiting for server respawn confirmation...`);
-                                } else {
-                                    // Normal gameplay state - selective reconciliation
-                                    // 1. Check if segments differ significantly from our prediction
-                                    const segmentDifference = calculateSegmentDifference(
-                                        predictedSegments, 
-                                        clientSnakeServerState.segments
-                                    );
-                                    
-                                    if (segmentDifference > RECONCILIATION_THRESHOLD) {
-                                        // Too much difference - hard reconcile
-                                        console.log(`[Client ${clientId}] Hard reconciliation (${segmentDifference} differences).`);
-                                        setPredictedSegments(clientSnakeServerState.segments);
-                                        inputHistoryRef.current = []; // Clear input history past this point
-                                    } else if (segmentDifference > 0) {
-                                        // Small difference - soft reconcile (keep predicted head position)
-                                        console.log(`[Client ${clientId}] Soft reconciliation (${segmentDifference} differences).`);
-                                        // If the difference is small, we might want to keep our predicted head position
-                                        // but adjust the rest based on server state
-                                        const newSegments = [...clientSnakeServerState.segments];
-                                        if (predictedSegments.length > 0) {
-                                            // Replace head with our predicted head, if we have one
-                                            newSegments[0] = predictedSegments[0];
-                                        }
-                                        setPredictedSegments(newSegments);
-                                    } else {
-                                        // No difference - no need to reconcile
-                                    }
-                                }
-                            }
-                        } else {
-                            // Handle case where client snake is not in server state
-                            console.log(`[Client ${clientId}] Not found in server state update.`);
-                            if (!isClientRespawning) { // Avoid redundant logs if already respawning
-                                console.log(`[Client ${clientId}] Assuming respawn due to missing state.`);
-                                setIsClientRespawning(true); // Assume respawning if missing
-                                setRespawnEndTime(null); // Cannot know end time if missing state
-                                setRespawnCountdown(null);
-                                setQueuedDirection(null); // Clear queue if snake disappears
-                                inputHistoryRef.current = []; // Clear input history
-                            }
-                            // Server state reflects snake is gone, clear local prediction flag
-                            predictedDeathRef.current = false;
-                            setPredictedSegments([]);
+            countdownIntervalRef.current = setInterval(() => {
+                setRespawnCountdown(prev => {
+                    if (prev === null || prev <= 1) {
+                        // When countdown reaches 1 (or is null), clear interval and reset
+                        if (countdownIntervalRef.current) {
+                            clearInterval(countdownIntervalRef.current);
+                            countdownIntervalRef.current = null;
                         }
+                        resetGame(); // Reset the game state in the hook
+                        return null; // Clear the countdown display
                     }
-                }
-            } catch (error) {
-                console.error('Failed to parse message or invalid message format:', lastMessage.data, error);
+                    return prev - 1; // Decrement countdown
+                });
+            }, 1000);
+        } else {
+            // If game is not over, ensure countdown is null
+            setRespawnCountdown(null);
+        }
+
+        // Cleanup function to clear interval on unmount or when gameOver changes
+        return () => {
+            if (countdownIntervalRef.current) {
+                clearInterval(countdownIntervalRef.current);
+                countdownIntervalRef.current = null;
             }
-        }
-        // Removed predictedSegments from dependency array as we now always update when not respawning
-    }, [lastMessage, clientId, isClientRespawning]); // Added isClientRespawning to dependencies
-
-    // --- Input Handling ---
-    const handleKeyDown = useCallback((event: KeyboardEvent) => {
-        // Ignore key repeat events and respawning state
-        if (event.repeat || isClientRespawning) return;
-        
-        let newDirection: 'up' | 'down' | 'left' | 'right' | null = null;
-        switch (event.key) {
-            case 'ArrowUp': case 'w': newDirection = 'up'; break;
-            case 'ArrowDown': case 's': newDirection = 'down'; break;
-            case 'ArrowLeft': case 'a': newDirection = 'left'; break;
-            case 'ArrowRight': case 'd': newDirection = 'right'; break;
-        }
-
-        if (newDirection && readyState === WebSocket.OPEN) {
-            // Immediately send to server for responsive controls
-            sendMessage({ type: 'move', payload: { direction: newDirection } });
-            
-            // Add to our direction queue
-            directionQueueRef.current.push(newDirection);
-            
-            // Record input with timestamp in history
-            const timestamp = Date.now();
-            inputHistoryRef.current.push({
-                direction: newDirection,
-                timestamp: timestamp
-            });
-            
-            // Limit history size
-            if (inputHistoryRef.current.length > MAX_PREDICTION_BUFFER) {
-                inputHistoryRef.current.shift();
-            }
-        }
-    }, [readyState, sendMessage, isClientRespawning]);
-
-    // --- Additional Continuous Input Processing ---
+        };
+    }, [gameOver, resetGame]); // Depend only on gameOver and resetGame
+    
+    // Handle apple eaten
     useEffect(() => {
-        // Process the input queue more frequently than the game tick
-        const processInputQueue = () => {
-            // Skip if respawning or no queue
-            if (isClientRespawning || directionQueueRef.current.length === 0) {
-                return;
+        if (appleEaten) {
+            // Generate new apple position
+            let newApple: Position;
+            do {
+                newApple = {
+                    x: Math.floor(Math.random() * gridSize),
+                    y: Math.floor(Math.random() * gridSize)
+                };
+                // Make sure the apple doesn't spawn on the snake
+            } while (segments.some(segment => segment.x === newApple.x && segment.y === newApple.y));
+            
+            setApple(newApple);
+            setScore(prevScore => prevScore + 1);
+        }
+    }, [appleEaten, segments, gridSize]);
+    
+    // Handle keyboard input
+    useEffect(() => {
+        const handleKeyDown = (event: KeyboardEvent) => {
+            // Don't handle input if game over or key is already being held down
+            if (event.repeat || gameOver) return;
+            
+            // Determine direction from key
+            let newDirection: Direction | null = null;
+            switch (event.key) {
+                case 'ArrowUp': case 'w': case 'W':
+                    newDirection = 'up';
+                    event.preventDefault(); // Prevent page scrolling
+                    break;
+                case 'ArrowDown': case 's': case 'S':
+                    newDirection = 'down';
+                    event.preventDefault(); // Prevent page scrolling
+                    break;
+                case 'ArrowLeft': case 'a': case 'A':
+                    newDirection = 'left';
+                    event.preventDefault(); // Prevent page scrolling
+                    break;
+                case 'ArrowRight': case 'd': case 'D':
+                    newDirection = 'right';
+                    event.preventDefault(); // Prevent page scrolling
+                    break;
+                default:
+                    return; // Unknown key, do nothing
             }
             
-            // Get the next direction from queue
-            const nextDirection = directionQueueRef.current[0];
-            
-            const isValidDirection = !(
-                (nextDirection === 'up' && predictedDirection === 'down') ||
-                (nextDirection === 'down' && predictedDirection === 'up') ||
-                (nextDirection === 'left' && predictedDirection === 'right') ||
-                (nextDirection === 'right' && predictedDirection === 'left') ||
-                nextDirection === predictedDirection
-            );
-            
-            if (isValidDirection) {
-                // Apply valid direction immediately to be responsive
-                setPredictedDirection(nextDirection);
+            // If we got a valid direction, send it to the game loop
+            if (newDirection) {
+                addInput(newDirection);
             }
-            
-            // Always remove the processed direction from queue
-            directionQueueRef.current.shift();
         };
         
-        // Run input processing at a higher frequency than game ticks
-        const intervalId = setInterval(processInputQueue, 20); // 50Hz processing (every 20ms)
-        
-        return () => clearInterval(intervalId);
-    }, [isClientRespawning, predictedDirection]);
-
-    useEffect(() => {
+        // Add key event listener
         window.addEventListener('keydown', handleKeyDown);
-        return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [handleKeyDown]);
-
-    // --- Client-side Prediction Loop ---
-    useEffect(() => {
-        const runPredictionLoop = (timestamp: number) => {
-            // Stop prediction if client is marked as respawning or not ready
-            if (!clientId || isClientRespawning) {
-                 gameLoopRef.current = requestAnimationFrame(runPredictionLoop);
-                 return;
-            }
-
-            // Remove the queue processing from here since we're handling it in a separate effect
-            // This ensures inputs are applied more responsively and not just on tick boundaries
-
-            // --- Tick-Based Movement Prediction ---
-            const delta = timestamp - lastUpdateTimeRef.current;
-            const estimatedServerTime = Date.now() - (latency / 2); // Account for one-way latency
-            
-            if (delta >= CLIENT_TICK_RATE) { // Use reverted tick rate
-                lastUpdateTimeRef.current = timestamp;
-
-                 // Ensure we have segments to predict from *inside* the tick
-                 if (predictedSegments.length === 0 && !isClientRespawning) {
-                     // Skip if segments are empty but not officially respawning yet
-                 } else if (predictedSegments.length > 0) { // Only predict if we have segments
-                    setPredictedSegments(prevSegments => {
-                        // This state update function now contains the core prediction logic
-
-                        // Should not happen due to checks above, but safeguard
-                        if (prevSegments.length === 0) return [];
-
-                        const currentHead = { ...prevSegments[0] };
-                        const nextHead = { ...currentHead };
-                        const currentGridSize = gameState?.gridSize ?? GRID_SIZE;
-
-                        // Calculate next head position based on the *current* predictedDirection
-                        // (which might have just been updated by the queue processing above)
-                        switch (predictedDirection) {
-                            case 'up': nextHead.y -= 1; break;
-                            case 'down': nextHead.y += 1; break;
-                            case 'left': nextHead.x -= 1; break;
-                            case 'right': nextHead.x += 1; break;
-                        }
-
-                        // --- Predict Wall Collision ---
-                        // ... existing logic ...
-                        const wallCollision =
-                            nextHead.x < 0 ||
-                            nextHead.x >= currentGridSize ||
-                            nextHead.y < 0 ||
-                            nextHead.y >= currentGridSize;
-
-                        if (wallCollision) {
-                            console.warn(`[Client ${clientId}] Predicted wall collision. Triggering respawn locally.`);
-                            predictedDeathRef.current = true; // Set flag: waiting for server confirmation
-                            const estimatedEndTime = Date.now() + RESPAWN_DELAY;
-                            setIsClientRespawning(true);
-                            setRespawnEndTime(estimatedEndTime);
-                            setRespawnCountdown(Math.ceil(RESPAWN_DELAY / 1000));
-                            sendMessage({ type: 'died' });
-                            return [];
-                        }
-
-                        // --- Predict Self-Collision ---
-                        // ... existing logic ...
-                         const selfCollision = prevSegments.slice(1).some(
-                            segment => nextHead.x === segment.x && nextHead.y === segment.y
-                        );
-
-                        if (selfCollision) {
-                            console.warn(`[Client ${clientId}] Predicted self-collision. Triggering respawn locally.`);
-                            predictedDeathRef.current = true; // Set flag: waiting for server confirmation
-                            const estimatedEndTime = Date.now() + RESPAWN_DELAY;
-                            setIsClientRespawning(true);
-                            setRespawnEndTime(estimatedEndTime);
-                            setRespawnCountdown(Math.ceil(RESPAWN_DELAY / 1000));
-                            sendMessage({ type: 'died' });
-                            return [];
-                        }
-
-                        // --- Prevent Double-Back (Check against prevSegments[1]) ---
-                        // Note: This check might be less critical now server handles it, but keep for local prediction sanity
-                        if (prevSegments.length > 1) {
-                            const secondSegment = prevSegments[1];
-                            if (nextHead.x === secondSegment.x && nextHead.y === secondSegment.y) {
-                                // If the calculated move hits the neck, it implies an invalid immediate reversal attempt.
-                                // Instead of moving, effectively skip the move for this tick by returning prevSegments.
-                                // Or, more accurately, recalculate nextHead based on the direction *before* the invalid queued input was processed.
-                                // For simplicity here, let's just log and potentially revert to currentHead - server will correct.
-                                console.warn("Client Prediction: Double-back prevented locally.");
-                                // Revert nextHead to currentHead to effectively stall for this tick
-                                nextHead.x = currentHead.x;
-                                nextHead.y = currentHead.y;
-                            }
-                        }
-
-                        // --- Predict Apple Eating ---
-                        // ... existing logic ...
-                        let ateApplePredicted = false;
-                        if (gameState?.apple && nextHead.x === gameState.apple.x && nextHead.y === gameState.apple.y) {
-                            console.log(`[Client ${clientId}] Predicted eating apple.`);
-                            ateApplePredicted = true;
-                        }
-
-                        // --- Update Segments ---
-                        const newSegments = [...prevSegments];
-                        // Only add the head if it actually moved (didn't stall due to double-back prediction)
-                        if (nextHead.x !== currentHead.x || nextHead.y !== currentHead.y) {
-                             newSegments.unshift(nextHead);
-                        }
-
-                        // --- Tail Removal Logic ---
-                        // ... existing logic ...
-                        const serverSnakeState = gameState?.snakes.find(s => s.id === clientId);
-                        const serverLength = serverSnakeState?.segments?.length ?? 0;
-                        const grewOnServer = serverSnakeState && !serverSnakeState.isRespawning && serverLength > prevSegments.length;
-
-                        if (!ateApplePredicted && !grewOnServer) {
-                             if (!serverSnakeState || serverSnakeState.isRespawning || newSegments.length > serverLength) {
-                                  // Only pop if the snake actually moved/grew in this prediction step
-                                  if (newSegments.length > prevSegments.length || newSegments.length > 1) {
-                                       newSegments.pop();
-                                  }
-                             }
-                        }
-
-                        return newSegments;
-                    });
-                 }
-            }
-
-            gameLoopRef.current = requestAnimationFrame(runPredictionLoop);
-        };
-
-        // Start the loop
-        lastUpdateTimeRef.current = performance.now();
-        gameLoopRef.current = requestAnimationFrame(runPredictionLoop);
-
-        // Cleanup function
+        
+        // Clean up event listener on unmount
         return () => {
-            if (gameLoopRef.current) {
-                cancelAnimationFrame(gameLoopRef.current);
-            }
+            window.removeEventListener('keydown', handleKeyDown);
         };
-    }, [clientId, predictedDirection, gameState, predictedSegments.length, isClientRespawning, queuedDirection, sendMessage, latency]); // sendMessage is technically not needed here anymore, but harmless
-
-    // --- Respawn Countdown Timer ---
+    }, [addInput, gameOver]);
+    
+    // Reset score when game restarts (triggered by resetGame which changes gameOver)
     useEffect(() => {
-        let intervalId: NodeJS.Timeout | null = null;
-
-        if (isClientRespawning && respawnEndTime) {
-            const updateCountdown = () => {
-                const now = Date.now();
-                const remainingSeconds = Math.max(0, Math.ceil((respawnEndTime - now) / 1000));
-                setRespawnCountdown(remainingSeconds);
-
-                if (remainingSeconds <= 0) {
-                    // Although server state dictates the end, we can clear interval early
-                    if (intervalId) clearInterval(intervalId);
-                }
-            };
-
-            updateCountdown(); // Initial update
-            intervalId = setInterval(updateCountdown, 1000); // Update every second
+        if (!gameOver && score > 0) {
+            // If the game is not over (meaning it just restarted) and score was > 0, reset score
+            setScore(0);
         }
-
-        // Cleanup function
-        return () => {
-            if (intervalId) {
-                clearInterval(intervalId);
-            }
-        };
-    }, [isClientRespawning, respawnEndTime]); // Run when respawn state or end time changes
-
-    // When component unmounts or when key dependencies change, clear the direction queue
-    useEffect(() => {
-        return () => {
-            directionQueueRef.current = [];
-        };
-    }, [clientId, isClientRespawning]);
-
-    // --- Rendering ---
-    const gridSize = gameState?.gridSize ?? GRID_SIZE;
-    const connectionStatus = {
-        [WebSocket.CONNECTING]: 'Connecting...',
-        [WebSocket.OPEN]: 'Connected',
-        [WebSocket.CLOSING]: 'Closing...',
-        [WebSocket.CLOSED]: 'Disconnected',
-    }[readyState];
+        // No dependency on segments.length needed here
+    }, [gameOver, score]);
+    
+    // Determine game board size
     const gameBoardSize = 'min(80vw, 80vh)';
-    const clientSnakeHue = gameState?.snakes.find(s => s.id === clientId)?.hue ?? 120;
 
     return (
-        <div className="flex flex-col items-center justify-center min-h-screen bg-gray-100 dark:bg-gray-900 p-4">
-            {/* ... Header, Status, Client ID ... */}
-             <h1 className="text-3xl font-bold mb-2 text-gray-800 dark:text-gray-200">Multiplayer Snake</h1>
-            <p className="mb-1 text-sm text-gray-600 dark:text-gray-400">Status: {connectionStatus}</p>
-            {clientId && <p className="mb-3 text-sm text-blue-600 dark:text-blue-400">Your ID: {clientId} - Ping: {latency}ms</p>}
-
+        <div className="flex flex-col items-center">
+            <h1 className="text-3xl font-bold mb-2 text-gray-800 dark:text-gray-200">Snake Game</h1>
+            
+            {/* Game stats */}
+            <div className="mb-2 flex items-center gap-4 text-sm">
+                <p className="font-bold">Score: {score}</p>
+                <p>Length: {segments.length}</p>
+                <p>Input: <span className="font-mono uppercase">{requestedDirection}</span></p> 
+            </div>
+            
+            {/* Game board */}
             <div
-                className="relative game-grid-bg border-2 border-gray-500 dark:border-gray-700 shadow-lg overflow-hidden" // Added overflow-hidden
+                className="relative border-2 border-gray-500 dark:border-gray-700 shadow-lg overflow-hidden game-grid-bg" 
                 style={{
                     width: gameBoardSize,
                     height: gameBoardSize,
                     maxWidth: '600px',
                     maxHeight: '600px',
-                 }}
+                }}
             >
-                {gameState ? (
-                    <>
-                        {/* Render other snakes from gameState (only if not respawning) */}
-                        {gameState.snakes
-                            .filter(snake => snake.id !== clientId && !snake.isRespawning) // Exclude client and respawning snakes
-                            .map((snake) => (
-                                <Snake
-                                    key={snake.id}
-                                    segments={snake.segments}
-                                    hue={snake.hue} // Pass hue instead of color
-                                    gridSize={gridSize}
-                                />
-                            ))}
-
-                        {/* Render client's snake OR respawn message */}
-                        {clientId && !isClientRespawning && predictedSegments.length > 0 && (
-                            <Snake
-                                key={clientId}
-                                segments={predictedSegments}
-                                hue={clientSnakeHue} // Pass client's hue
-                                gridSize={gridSize}
-                            />
+                {/* Apple */}
+                <Apple position={apple} gridSize={gridSize} />
+                
+                {/* Snake */}
+                {segments.length > 0 && (
+                    <Snake
+                        segments={segments}
+                        hue={120} // Green for the snake
+                        gridSize={gridSize}
+                    />
+                )}
+                
+                {/* Game over overlay with countdown */}
+                {gameOver && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center text-white bg-black/60 text-xl font-bold z-20">
+                        <div>Game Over!</div>
+                        <div className="text-2xl mt-2">Score: {score}</div>
+                        {respawnCountdown !== null && respawnCountdown > 0 && ( // Only show countdown if > 0
+                            <>
+                                <div className="text-7xl mt-4 font-mono">{respawnCountdown}</div>
+                                <div className="text-lg mt-4">Restarting in {respawnCountdown} {respawnCountdown === 1 ? 'second' : 'seconds'}...</div>
+                            </>
                         )}
-                        {clientId && isClientRespawning && (
-                             <div className="absolute inset-0 flex flex-col items-center justify-center text-white bg-black/60 text-xl font-bold z-10">
-                                <div>Respawning...</div>
-                                {/* Display countdown if available */}
-                                {respawnCountdown !== null && (
-                                    // Increased text size using text-7xl
-                                    <div className="text-7xl mt-2 font-mono">{respawnCountdown}</div>
-                                )}
-                             </div>
-                        )}
-
-                        {/* Render apple from gameState */}
-                        <Apple position={gameState.apple} gridSize={gridSize} />
-                    </>
-                ) : (
-                    <div className="absolute inset-0 flex items-center justify-center text-gray-500 dark:text-gray-400">
-                        {readyState === WebSocket.OPEN ? 'Waiting for game state...' : connectionStatus}
                     </div>
                 )}
+            </div>
+            
+            {/* Controls help */}
+            <div className="mt-4 text-sm text-gray-600 dark:text-gray-400">
+                Use arrow keys or WASD to control the snake
             </div>
         </div>
     );
