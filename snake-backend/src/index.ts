@@ -45,6 +45,13 @@ const server = Bun.serve<{ socketId: string }>({
                         }
                         break;
                         
+                    case 'boost_update':
+                        // Handle boost state from client
+                        if (data.payload && typeof data.payload.isBoosting === 'boolean') {
+                            game.handleBoostUpdate(socketId, data.payload.isBoosting);
+                        }
+                        break;
+                        
                     case 'ping':
                         // Handle ping for latency measurement
                         ws.send(JSON.stringify({ 

@@ -3,23 +3,28 @@ import React, { useEffect, useState, useRef, useCallback } from 'react';
 import useClientGameLoop, { Direction } from '../hooks/useClientGameLoop';
 import Snake from './Snake';
 import Apple from './Apple';
-import { useWebSocket } from '../hooks/useWebSocket'; // Re-import WebSocket hook
+import BoostMeter from './BoostMeter';
+import { useWebSocket } from '../hooks/useWebSocket';
 
-// Update Player interface to include isRespawning
+// Update Player interface to include boosting
 interface Player {
     id: string;
     segments: { x: number; y: number }[];
     direction: Direction;
     hue: number;
     size: number;
-    isRespawning: boolean; // Added
+    isRespawning: boolean;
+    isBoosting: boolean; // Add boosting state
 }
 
 interface Position { x: number; y: number; }
 
 const DEFAULT_GRID_SIZE = 20;
 const CLIENT_TICK_RATE = 200;
-const RESPAWN_COUNTDOWN_DURATION = 3; // Use the constant from hook if exported, or define here
+const RESPAWN_COUNTDOWN_DURATION = 3;
+const BOOST_MAX = 100; // Maximum boost amount
+const BOOST_DRAIN_RATE = 0.5; // How fast boost depletes (per frame)
+const BOOST_RECHARGE_RATE = 0.2; // How fast boost recharges (per frame)
 
 const Game: React.FC = () => {
     // WebSocket connection
@@ -40,12 +45,26 @@ const Game: React.FC = () => {
     const [totalPlayers, setTotalPlayers] = useState<number>(0); // State for total player count
     const [playerHue, setPlayerHue] = useState<number>(120); // Default to green until we get server value
 
+    // Boost mechanics
+    const [isBoosting, setIsBoosting] = useState<boolean>(false);
+    const [boostAmount, setBoostAmount] = useState<number>(BOOST_MAX);
+    const [canBoost, setCanBoost] = useState<boolean>(true); // To prevent boost when empty
+
     // Callback to send position updates to the server
     const handlePositionUpdate = useCallback((segments: Position[], direction: Direction) => {
         if (!connected || isRespawning) return;
         sendMessage({
             type: 'position_update',
             payload: { segments, direction }
+        });
+    }, [connected, isRespawning, sendMessage]);
+
+    // New function to send boost state to server
+    const sendBoostUpdate = useCallback((boosting: boolean) => {
+        if (!connected || isRespawning) return;
+        sendMessage({
+            type: 'boost_update',
+            payload: { isBoosting: boosting }
         });
     }, [connected, isRespawning, sendMessage]);
 
@@ -66,10 +85,44 @@ const Game: React.FC = () => {
         isRespawning, // Pass isRespawning
         initialPosition, // Pass initialPosition
         onPositionUpdate: handlePositionUpdate, // Pass callback
+        isBoosting, // Pass boosting state
+        tickMultiplier: 1.5, // 1.5x speed when boosting
     });
 
     // Track if we've synced local state to server state after connect
     const hasSyncedRef = useRef(false);
+
+    // Handle boost meter logic (drain when boosting, recharge when not)
+    useEffect(() => {
+        const boostTimer = setInterval(() => {
+            setBoostAmount(prev => {
+                if (isBoosting) {
+                    // Drain boost meter when boosting
+                    const newAmount = Math.max(0, prev - BOOST_DRAIN_RATE);
+                    
+                    // If boost depleted, turn off boosting
+                    if (newAmount <= 0 && isBoosting) {
+                        setIsBoosting(false);
+                        sendBoostUpdate(false);
+                        setCanBoost(false); // Must recharge before boosting again
+                    }
+                    return newAmount;
+                } else {
+                    // Recharge boost meter when not boosting
+                    const newAmount = Math.min(BOOST_MAX, prev + BOOST_RECHARGE_RATE);
+                    
+                    // Re-enable boost when recharged to 30%
+                    if (newAmount >= BOOST_MAX * 0.3 && !canBoost) {
+                        setCanBoost(true);
+                    }
+                    
+                    return newAmount;
+                }
+            });
+        }, 16); // Update at ~60fps
+        
+        return () => clearInterval(boostTimer);
+    }, [isBoosting, canBoost, sendBoostUpdate]);
 
     // Process server messages
     useEffect(() => {
@@ -222,11 +275,18 @@ const Game: React.FC = () => {
         console.log(`clientId state updated in component: ${clientId}`);
     }, [clientId]);
 
-    // Handle keyboard input (no changes needed here)
+    // Handle keyboard input for movement and boosting
     useEffect(() => {
         const handleKeyDown = (event: KeyboardEvent) => {
             // Input disabled during respawn countdown
             if (event.repeat || isRespawning) return;
+
+            // Handle boost activation with spacebar
+            if (event.key === ' ' && canBoost && !isBoosting) {
+                setIsBoosting(true);
+                sendBoostUpdate(true);
+                return;
+            }
 
             let newDirection: Direction | null = null;
             switch (event.key) {
@@ -240,9 +300,23 @@ const Game: React.FC = () => {
                 addInput(newDirection);
             }
         };
+        
+        const handleKeyUp = (event: KeyboardEvent) => {
+            // Stop boosting when spacebar is released
+            if (event.key === ' ' && isBoosting) {
+                setIsBoosting(false);
+                sendBoostUpdate(false);
+            }
+        };
+        
         window.addEventListener('keydown', handleKeyDown);
-        return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [addInput, isRespawning]); // Depend on isRespawning
+        window.addEventListener('keyup', handleKeyUp);
+        
+        return () => {
+            window.removeEventListener('keydown', handleKeyDown);
+            window.removeEventListener('keyup', handleKeyUp);
+        };
+    }, [addInput, isRespawning, isBoosting, canBoost, sendBoostUpdate]);
 
     // Cleanup countdown interval on unmount
     useEffect(() => {
@@ -294,6 +368,14 @@ const Game: React.FC = () => {
                 <p>Input: <span className="font-mono uppercase">{displayDirection}</span></p>
                 {/* Player count uses the total count from server state */}
                 <p>Players: {totalPlayers}</p>
+                
+                {/* Boost meter */}
+                <div className="flex items-center gap-2">
+                    <span className={`text-xs ${isBoosting ? 'text-red-500 font-bold' : ''}`}>
+                        BOOST
+                    </span>
+                    <BoostMeter boostAmount={boostAmount} isBoosting={isBoosting} />
+                </div>
             </div>
 
             {/* Game board */}
@@ -323,6 +405,7 @@ const Game: React.FC = () => {
                         segments={player.segments}
                         hue={player.hue}
                         gridSize={gridSize}
+                        isBoosting={player.isBoosting}
                     />
                 ))}
 
@@ -332,6 +415,7 @@ const Game: React.FC = () => {
                         segments={segments}
                         hue={playerHue} // Use server-assigned hue instead of hardcoded 120
                         gridSize={gridSize}
+                        isBoosting={isBoosting}
                     />
                 )}
 
@@ -353,7 +437,7 @@ const Game: React.FC = () => {
 
             {/* Controls help */}
             <div className="mt-4 text-sm text-gray-600 dark:text-gray-400">
-                Use arrow keys or WASD to control the snake
+                Use arrow keys or WASD to control the snake. Press SPACE to boost!
             </div>
         </div>
     );

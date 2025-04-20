@@ -11,6 +11,8 @@ interface UseClientGameLoopProps {
     isRespawning: boolean; // Added
     initialPosition?: Position | null; // Added
     onPositionUpdate?: (segments: Position[], direction: Direction) => void; // Added
+    isBoosting: boolean; // Add boosting prop
+    tickMultiplier?: number; // Add speed multiplier for boost
 }
 
 interface ClientGameLoopState {
@@ -32,6 +34,8 @@ export const useClientGameLoop = ({
     isRespawning, // Added
     initialPosition, // Added
     onPositionUpdate, // Added
+    isBoosting = false,
+    tickMultiplier = 1.5, // Default boost is 1.5x speed
 }: UseClientGameLoopProps): ClientGameLoopState & { setSegments: typeof setSegments } => {
     // Snake state
     const [segments, setSegments] = useState<Position[]>([
@@ -116,6 +120,12 @@ export const useClientGameLoop = ({
 
         if (!gameLoopIntervalRef.current) {
             console.log("Client loop: Starting interval...");
+            
+            // Calculate effective tick rate based on boost state
+            const effectiveTickRate = isBoosting 
+                ? tickRate / tickMultiplier  // Faster ticks when boosting
+                : tickRate;
+                
             gameLoopIntervalRef.current = setInterval(() => {
                 let moveDirection: Direction;
 
@@ -160,7 +170,7 @@ export const useClientGameLoop = ({
                     return newSegments;
                 });
 
-            }, tickRate);
+            }, effectiveTickRate);
         }
 
         // Clean up
@@ -171,7 +181,7 @@ export const useClientGameLoop = ({
                 gameLoopIntervalRef.current = null;
             }
         };
-    }, [isRespawning, gridSize, tickRate]);
+    }, [isRespawning, gridSize, tickRate, isBoosting]); // Add isBoosting to dependencies
 
     return {
         segments,

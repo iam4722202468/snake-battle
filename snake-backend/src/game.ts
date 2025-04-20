@@ -12,6 +12,7 @@ interface ServerSnake {
     isRespawning: boolean;
     respawnEndTime: number;
     size: number; // Track the player's size for scoring
+    isBoosting: boolean; // Add boosting state
     ws: ServerWebSocket<{ socketId: string }>;
 }
 
@@ -23,6 +24,7 @@ export interface PlayerStateForClient {
     hue: number;
     size: number;
     isRespawning: boolean; // Added
+    isBoosting: boolean; // Add boosting state
 }
 
 export interface GameStateData {
@@ -63,6 +65,7 @@ export class Game {
             isRespawning: false,
             respawnEndTime: 0,
             size: 1, // Initial size
+            isBoosting: false, // Initialize as not boosting
             ws,
         });
 
@@ -294,7 +297,8 @@ export class Game {
                 direction: player.direction,
                 hue: player.hue,
                 size: player.size,
-                isRespawning: player.isRespawning // Include respawn status
+                isRespawning: player.isRespawning, // Include respawn status
+                isBoosting: player.isBoosting // Include boosting status
             }));
 
         return {
@@ -331,5 +335,14 @@ export class Game {
         } while (onSnake && attempts < maxAttempts);
         
         return position;
+    }
+
+    // Add a method to handle boost updates
+    handleBoostUpdate(socketId: string, isBoosting: boolean): void {
+        const player = this.players.get(socketId);
+        if (!player || player.isRespawning) return;
+        
+        player.isBoosting = isBoosting;
+        // No need to broadcast immediately, regular game_state will include it
     }
 }
