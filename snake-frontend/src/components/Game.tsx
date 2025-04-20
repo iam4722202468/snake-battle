@@ -7,6 +7,8 @@ import BoostMeter from './BoostMeter';
 import { useWebSocket } from '../hooks/useWebSocket';
 import MapSelector from './MapSelector';
 import { Player } from '../types/gameTypes';
+import { Tunnels, Teleporters } from './MapFeatures';
+import { getMapById } from '../data/maps';
 
 // Update Player interface to include boosting
 interface Player {
@@ -56,6 +58,16 @@ const Game: React.FC = () => {
     const [gameMode, setGameMode] = useState<'selection' | 'playing'>('selection');
 
     const [selectedMapId, setSelectedMapId] = useState<string | null>(null);
+    const [currentMapId, setCurrentMapId] = useState<string>('classic');
+    const currentMap = getMapById(currentMapId);
+
+    // Add state for teleportation effects
+    const [teleportEffect, setTeleportEffect] = useState<{from: number, to: number} | null>(null);
+    
+    // Add state for client-side teleport visual effect tracking
+    const [isClientTeleporting, setIsClientTeleporting] = useState<boolean>(false);
+    const [clientTeleportInfo, setClientTeleportInfo] = useState<{from: Position, to: Position} | null>(null);
+    const prevSegmentsRef = useRef<Position[]>([]); // Ref to store previous segments
 
     // Callback to send position updates to the server
     const handlePositionUpdate = useCallback((segments: Position[], direction: Direction) => {
@@ -114,6 +126,8 @@ const Game: React.FC = () => {
         displayDirection, // Use this for UI display
         addInput,
         setSegments, // <-- Add this to allow external segment updates
+        isTeleporting, // Get the teleporting state
+        teleportInfo // Get teleport info
     } = useClientGameLoop({
         gridSize,
         apple,
@@ -161,6 +175,34 @@ const Game: React.FC = () => {
         
         return () => clearInterval(boostTimer);
     }, [isBoosting, canBoost, sendBoostUpdate]);
+
+    // Improved teleport effect detection
+    useEffect(() => {
+        if (isTeleporting && teleportInfo && currentMapId === 'teleporters' && currentMap?.teleporters) {
+            // Find the source and destination teleporters
+            const sourceTeleporter = currentMap.teleporters.find(t => 
+                t.position.x === teleportInfo.from.x && t.position.y === teleportInfo.from.y
+            );
+            
+            const destTeleporter = currentMap.teleporters.find(t => 
+                t.position.x === teleportInfo.to.x && t.position.y === teleportInfo.to.y
+            );
+            
+            if (sourceTeleporter && destTeleporter) {
+                setTeleportEffect({
+                    from: sourceTeleporter.id,
+                    to: destTeleporter.id
+                });
+                
+                // Audio feedback could be added here
+                
+                // Clear effect after animation completes
+                setTimeout(() => {
+                    setTeleportEffect(null);
+                }, 600);
+            }
+        }
+    }, [isTeleporting, teleportInfo, currentMapId, currentMap]);
 
     // Process server messages
     useEffect(() => {
@@ -248,6 +290,10 @@ const Game: React.FC = () => {
                         console.log(`Setting game mode from server: ${data.payload.gameMode}`);
                         setGameMode(data.payload.gameMode);
                     }
+                    // Update current map from server state
+                    if (data.payload.currentMap && data.payload.currentMap !== currentMapId) {
+                        setCurrentMapId(data.payload.currentMap);
+                    }
                     break;
 
                 case 'apple_eat':
@@ -265,6 +311,7 @@ const Game: React.FC = () => {
                         console.log("Received death message FOR ME:", data.payload);
                         if (!isRespawning) { // Prevent duplicate state updates
                             setIsRespawning(true);
+                            prevSegmentsRef.current = []; // Clear segments history on death
                             // Score is already set by game_state, but ensure it's captured before respawn UI shows
                             // setScore(score); // score state should be up-to-date
 
@@ -301,6 +348,7 @@ const Game: React.FC = () => {
                             }
                             if (data.payload.position) {
                                 setInitialPosition(data.payload.position);
+                                prevSegmentsRef.current = [data.payload.position]; // Set initial history
                                 setTimeout(() => setInitialPosition(null), 50);
                                 hasSyncedRef.current = true; // Mark as synced after respawn
                             }
@@ -327,7 +375,7 @@ const Game: React.FC = () => {
             console.error("Error processing server message:", error, "Raw data:", lastMessage?.data);
         }
         // Dependencies: Added setIsRespawning, isRespawning
-    }, [lastMessage, clientId, setSegments, setScore, isRespawning, setIsRespawning, selectedMapId, gameMode]);
+    }, [lastMessage, clientId, setSegments, setScore, isRespawning, setIsRespawning, selectedMapId, gameMode, currentMapId, currentMap]);
 
     // Add a separate effect to log clientId changes
     useEffect(() => {
@@ -467,6 +515,8 @@ const Game: React.FC = () => {
                             </span>
                             <BoostMeter boostAmount={boostAmount} isBoosting={isBoosting} />
                         </div>
+                        {/* Add current map display */}
+                        <p>Map: <span className="font-semibold">{currentMap?.name || 'Classic'}</span></p>
                     </div>
 
                     {/* Game board */}
@@ -479,6 +529,16 @@ const Game: React.FC = () => {
                             maxHeight: '600px',
                         }}
                     >
+                        {/* Map features */}
+                        {currentMap?.tunnels && <Tunnels tunnels={currentMap.tunnels} gridSize={gridSize} />}
+                        {currentMap?.teleporters && (
+                            <Teleporters 
+                                teleporters={currentMap.teleporters} 
+                                gridSize={gridSize}
+                                activeEffect={teleportEffect} // Pass the active teleport effect
+                            />
+                        )}
+                        
                         {/* Connection Overlay */}
                          {!connected && readyState !== WebSocket.OPEN && (
                             <div className="absolute inset-0 flex items-center justify-center bg-black/70 z-30 text-white font-bold">
@@ -507,6 +567,9 @@ const Game: React.FC = () => {
                                 hue={playerHue} // Use server-assigned hue instead of hardcoded 120
                                 gridSize={gridSize}
                                 isBoosting={isBoosting}
+                                isTeleporting={isClientTeleporting} // Pass teleporting state to Snake
+                                teleportOrigin={clientTeleportInfo?.from || null}
+                                teleportTarget={clientTeleportInfo?.to || null}
                             />
                         )}
 
@@ -529,6 +592,12 @@ const Game: React.FC = () => {
                     {/* Controls help */}
                     <div className="mt-4 text-sm text-gray-600 dark:text-gray-400">
                         Use arrow keys or WASD to control the snake. Press SPACE to boost!
+                        {currentMap?.id === 'tunnels' && (
+                            <div>Use tunnels to pass through other snakes without collision!</div>
+                        )}
+                        {currentMap?.id === 'teleporters' && (
+                            <div>Pass through teleporters to jump to another location!</div>
+                        )}
                     </div>
                 </>
             )}

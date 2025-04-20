@@ -21,6 +21,23 @@ export interface GameMap {
   name: string;
   description: string;
   thumbnail: string;
+  tunnels?: Tunnel[];
+  teleporters?: Teleporter[];
+}
+
+export interface Tunnel {
+  startX: number;
+  startY: number;
+  endX: number;
+  endY: number;
+  direction: 'horizontal' | 'vertical';
+}
+
+export interface Teleporter {
+  id: number;
+  position: Position;
+  color: string;
+  destination: number;
 }
 
 export interface MapSelection {

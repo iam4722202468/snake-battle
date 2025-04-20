@@ -13,15 +13,16 @@ interface UseClientGameLoopProps {
     onPositionUpdate?: (segments: Position[], direction: Direction) => void;
     isBoosting: boolean;
     tickMultiplier?: number;
-    gameMode: 'selection' | 'playing'; // Add game mode prop
+    gameMode: 'selection' | 'playing';
 }
 
+// Remove teleport-related state from return type
 interface ClientGameLoopState {
     segments: Position[];
     direction: Direction;
     displayDirection: Direction;
     addInput: (newDirection: Direction) => void;
-    setSegments: React.Dispatch<React.SetStateAction<Position[]>>;
+    setSegments: React.Dispatch<React.SetStateAction<Position[]>>; // Expose raw setter
 }
 
 export const useClientGameLoop = ({
@@ -34,11 +35,13 @@ export const useClientGameLoop = ({
     onPositionUpdate,
     isBoosting = false,
     tickMultiplier = 1.5,
-    gameMode = 'playing', // Add default
+    gameMode = 'playing',
 }: UseClientGameLoopProps): ClientGameLoopState => {
     const [segments, setSegments] = useState<Position[]>([{ x: 10, y: 10 }]);
     const [direction, setDirection] = useState<Direction>('right');
     const [displayDirection, setDisplayDirection] = useState<Direction>('right');
+
+    // Remove teleport state: isTeleporting, teleportInfo, justTeleportedRef, lastPositionsRef
 
     // Refs for values used in animation frame logic
     const currentDirectionRef = useRef<Direction>('right');
@@ -49,13 +52,16 @@ export const useClientGameLoop = ({
     const lastTickTimeRef = useRef<number>(0);
     const tickRateRef = useRef(tickRate);
     const animationFrameIdRef = useRef<number | null>(null);
+    // Ref to hold the current segments state for use in callbacks
+    const segmentsRef = useRef(segments); 
 
-    // Keep refs updated with latest prop values
+    // Keep refs updated
     useEffect(() => { onPositionUpdateRef.current = onPositionUpdate; }, [onPositionUpdate]);
     useEffect(() => { appleRef.current = apple; }, [apple]);
     useEffect(() => { isBoostingRef.current = isBoosting; }, [isBoosting]);
     useEffect(() => { tickRateRef.current = tickRate; }, [tickRate]);
     useEffect(() => { currentDirectionRef.current = direction; }, [direction]);
+    useEffect(() => { segmentsRef.current = segments; }, [segments]); // Keep segmentsRef updated
 
     // Reset state when initial position changes (after respawn)
     useEffect(() => {
@@ -66,6 +72,7 @@ export const useClientGameLoop = ({
             setDisplayDirection(initialDir);
             currentDirectionRef.current = initialDir;
             inputBufferRef.current = [];
+            // No teleport state to reset here
         }
     }, [initialPosition]);
 
@@ -94,9 +101,10 @@ export const useClientGameLoop = ({
         }
     }, [isRespawning, segments.length, gameMode]);
 
+    // Remove setSegmentsWithTeleportCheck
+
     // Game loop using requestAnimationFrame for smoother performance
     useEffect(() => {
-        // Only run game loop if in playing mode and not respawning
         if (isRespawning || gameMode !== 'playing') {
             if (animationFrameIdRef.current) {
                 cancelAnimationFrame(animationFrameIdRef.current);
@@ -109,81 +117,79 @@ export const useClientGameLoop = ({
         lastTickTimeRef.current = performance.now();
 
         const gameLoop = (timestamp: number) => {
+            // Remove justTeleportedRef check
+
             const currentTickRate = isBoostingRef.current 
                 ? tickRateRef.current / tickMultiplier 
                 : tickRateRef.current;
                 
-            // Check if enough time has passed for a tick
             if (timestamp - lastTickTimeRef.current >= currentTickRate) {
                 lastTickTimeRef.current = timestamp;
                 
-                // Get next direction from input buffer or continue in current direction
                 let moveDirection: Direction;
                 if (inputBufferRef.current.length > 0) {
                     moveDirection = inputBufferRef.current.shift()!;
                 } else {
                     moveDirection = currentDirectionRef.current;
                 }
+                // Only update internal direction ref, state update happens via server
+                currentDirectionRef.current = moveDirection; 
+                // setDirection(moveDirection); // Let server state dictate this via Game.tsx
 
-                setDirection(moveDirection);
+                // Perform local prediction
+                const currentSegments = segmentsRef.current; // Use ref for prediction base
+                if (currentSegments.length === 0) {
+                     animationFrameIdRef.current = requestAnimationFrame(gameLoop);
+                     return; // Skip prediction if no segments
+                }
 
-                // Update segments based on moveDirection
-                setSegments(prevSegments => {
-                    if (prevSegments.length === 0) return prevSegments;
+                const head = currentSegments[0];
+                const newHead = { ...head };
 
-                    const head = prevSegments[0];
-                    const newHead = { ...head };
+                switch (moveDirection) {
+                    case 'up': newHead.y -= 1; break;
+                    case 'down': newHead.y += 1; break;
+                    case 'left': newHead.x -= 1; break;
+                    case 'right': newHead.x += 1; break;
+                }
 
-                    // Move head in the current direction
-                    switch (moveDirection) {
-                        case 'up': newHead.y -= 1; break;
-                        case 'down': newHead.y += 1; break;
-                        case 'left': newHead.x -= 1; break;
-                        case 'right': newHead.x += 1; break;
-                    }
+                const currentApple = appleRef.current;
+                const ateApple = newHead.x === currentApple.x && newHead.y === currentApple.y;
 
-                    // Client-side prediction of eating apple
-                    const currentApple = appleRef.current;
-                    const ateApple = newHead.x === currentApple.x && newHead.y === currentApple.y;
+                let newPredictedSegments = [newHead, ...currentSegments];
+                if (!ateApple) {
+                    newPredictedSegments = newPredictedSegments.slice(0, -1);
+                }
 
-                    let newSegments = [newHead, ...prevSegments];
-
-                    // Remove tail unless apple was eaten
-                    if (!ateApple) {
-                        newSegments = newSegments.slice(0, -1);
-                    }
-
-                    // Send position update to server
-                    if (onPositionUpdateRef.current) {
-                        onPositionUpdateRef.current(newSegments, moveDirection);
-                    }
-
-                    return newSegments;
-                });
+                // Send predicted position update to server
+                if (onPositionUpdateRef.current) {
+                    onPositionUpdateRef.current(newPredictedSegments, moveDirection);
+                }
+                
+                // *** Restore local state update for smooth visuals ***
+                setSegments(newPredictedSegments); 
             }
             
-            // Schedule next frame
             animationFrameIdRef.current = requestAnimationFrame(gameLoop);
         };
 
-        // Start the animation loop
         animationFrameIdRef.current = requestAnimationFrame(gameLoop);
 
-        // Cleanup on unmount or dependencies change
         return () => {
             if (animationFrameIdRef.current) {
                 cancelAnimationFrame(animationFrameIdRef.current);
                 animationFrameIdRef.current = null;
             }
         };
-    }, [isRespawning, gridSize, tickMultiplier, gameMode]);
+    }, [isRespawning, gridSize, tickMultiplier, gameMode]); // Removed setSegments dependency
 
     return {
         segments,
-        direction,
+        direction, // This might become slightly out of sync, displayDirection is better for UI
         displayDirection,
         addInput,
-        setSegments
+        setSegments, // Expose the raw setter for Game.tsx to use
+        // Remove isTeleporting and teleportInfo from return
     };
 };
 
