@@ -55,10 +55,6 @@ const Game: React.FC = () => {
     const [currentMapId, setCurrentMapId] = useState<string>('classic');
     const currentMap = getMapById(currentMapId);
 
-    const [teleportEffect, setTeleportEffect] = useState<{from: number, to: number} | null>(null);
-    
-    const prevSegmentsRef = useRef<Position[]>([]);
-
     const handlePositionUpdate = useCallback((segments: Position[], direction: Direction) => {
         if (!connected || isRespawning) return;
         sendMessage({
@@ -106,7 +102,6 @@ const Game: React.FC = () => {
 
     const {
         segments,
-        direction,
         displayDirection,
         addInput,
         setSegments,
@@ -114,7 +109,6 @@ const Game: React.FC = () => {
         gridSize,
         apple,
         tickRate: CLIENT_TICK_RATE,
-        clientId,
         isRespawning,
         initialPosition,
         onPositionUpdate: handlePositionUpdate,
@@ -122,8 +116,6 @@ const Game: React.FC = () => {
         tickMultiplier: 1.5,
         gameMode,
     });
-
-    const hasSyncedRef = useRef(false);
 
     useEffect(() => {
         const boostTimer = setInterval(() => {
@@ -161,7 +153,6 @@ const Game: React.FC = () => {
                     const newClientId = data.payload.id;
                     console.log(`Processing 'assign_id'. Current clientId: ${clientId}, New clientId: ${newClientId}`);
                     setClientId(newClientId);
-                    hasSyncedRef.current = false;
                     console.log(`Set clientId to: ${newClientId}`);
                     break;
 
@@ -181,22 +172,20 @@ const Game: React.FC = () => {
 
                             const selfData = data.payload.players.find(p => p.id === clientId);
 
-                            if (selfData && !hasSyncedRef.current) {
-                                console.log(`Initial sync for ${clientId}. Segments:`, selfData.segments);
-                                setSegments(selfData.segments);
-                                hasSyncedRef.current = true;
+                            if (selfData) {
+                                setSegments(selfData.segments); 
                                 setScore(selfData.size || 1);
                                 setPlayerHue(selfData.hue);
-                            } else if (selfData) {
-                                setScore(selfData.size || 1);
-                                if (selfData.isRespawning && !isRespawning) {
-                                     console.log("Syncing local isRespawning to true based on server state");
-                                     setIsRespawning(true);
-                                } else if (!selfData.isRespawning && isRespawning) {
-                                     // Respawn handled by 'respawn' message
+                                if (selfData.isRespawning !== isRespawning) {
+                                    setIsRespawning(selfData.isRespawning);
+                                    if (selfData.isRespawning) {
+                                        console.log("Syncing local isRespawning to true based on server state");
+                                    }
                                 }
-                                setPlayerHue(selfData.hue);
-                            } else if (!selfData && hasSyncedRef.current) {
+                                if (selfData.selectedMapId !== selectedMapId) {
+                                     setSelectedMapId(selfData.selectedMapId || null);
+                                }
+                            } else {
                                 if (!isRespawning) {
                                     console.log("Syncing local isRespawning to true (self not found in server state)");
                                     setIsRespawning(true);
@@ -204,13 +193,6 @@ const Game: React.FC = () => {
                             }
                         } else {
                             console.log("Processing 'game_state' but clientId is not set yet. Clearing other players.");
-                        }
-
-                        if (clientId) {
-                            const selfData = data.payload.players.find(p => p.id === clientId);
-                            if (selfData && selfData.selectedMapId && selectedMapId !== selfData.selectedMapId) {
-                                setSelectedMapId(selfData.selectedMapId);
-                            }
                         }
                     }
                     if (data.payload.gameMode && data.payload.gameMode !== gameMode) {
@@ -233,7 +215,6 @@ const Game: React.FC = () => {
                         console.log("Received death message FOR ME:", data.payload);
                         if (!isRespawning) {
                             setIsRespawning(true);
-                            prevSegmentsRef.current = [];
 
                             const respawnDelay = data.payload.respawnDelay || (RESPAWN_COUNTDOWN_DURATION * 1000);
                             const endTime = Date.now() + respawnDelay;
@@ -267,9 +248,7 @@ const Game: React.FC = () => {
                             }
                             if (data.payload.position) {
                                 setInitialPosition(data.payload.position);
-                                prevSegmentsRef.current = [data.payload.position];
                                 setTimeout(() => setInitialPosition(null), 50);
-                                hasSyncedRef.current = true;
                             }
                         }
                     } else if (data.payload && clientId) {
@@ -292,10 +271,6 @@ const Game: React.FC = () => {
             console.error("Error processing server message:", error, "Raw data:", lastMessage?.data);
         }
     }, [lastMessage, clientId, setSegments, setScore, isRespawning, setIsRespawning, selectedMapId, gameMode, currentMapId, currentMap]);
-
-    useEffect(() => {
-        console.log(`clientId state updated in component: ${clientId}`);
-    }, [clientId]);
 
     useEffect(() => {
         const handleKeyDown = (event: KeyboardEvent) => {
@@ -389,7 +364,7 @@ const Game: React.FC = () => {
                     players={[...otherPlayers, ...(clientId ? [{
                         id: clientId,
                         segments,
-                        direction,
+                        direction: displayDirection,
                         hue: playerHue,
                         size: score,
                         isRespawning,
@@ -431,7 +406,6 @@ const Game: React.FC = () => {
                             <Teleporters 
                                 teleporters={currentMap.teleporters} 
                                 gridSize={gridSize}
-                                activeEffect={teleportEffect}
                             />
                         )}
                         

@@ -13,7 +13,7 @@ export interface Player {
   size: number;
   isRespawning: boolean;
   isBoosting: boolean;
-  selectedMapId?: string;
+  selectedMapId: string | null;
 }
 
 export interface GameMap {
