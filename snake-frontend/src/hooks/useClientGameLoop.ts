@@ -50,6 +50,10 @@ export const useClientGameLoop = ({
     const gameLoopIntervalRef = useRef<NodeJS.Timeout | null>(null);
     const onPositionUpdateRef = useRef(onPositionUpdate); // Ref for the callback
     const appleRef = useRef(apple); // Ref for the current apple position
+    const isBoostingRef = useRef(isBoosting); // Reference to current boost state
+    const lastTickTimeRef = useRef<number>(0);
+    const tickRateRef = useRef(tickRate);
+    const animationFrameIdRef = useRef<number | null>(null);
 
     // Keep the callback ref updated
     useEffect(() => {
@@ -59,6 +63,14 @@ export const useClientGameLoop = ({
     useEffect(() => {
         appleRef.current = apple;
     }, [apple]);
+
+    useEffect(() => {
+        isBoostingRef.current = isBoosting;
+    }, [isBoosting]);
+
+    useEffect(() => {
+        tickRateRef.current = tickRate;
+    }, [tickRate]);
 
     // Update the currentDirectionRef whenever the actual direction changes
     useEffect(() => {
@@ -108,27 +120,30 @@ export const useClientGameLoop = ({
         }
     }, [isRespawning, segments.length]); // Added isRespawning dependency
 
+    // Game loop using requestAnimationFrame instead of setInterval for smoother performance
     useEffect(() => {
         if (isRespawning) {
-            if (gameLoopIntervalRef.current) {
-                clearInterval(gameLoopIntervalRef.current);
-                gameLoopIntervalRef.current = null;
+            if (animationFrameIdRef.current) {
+                cancelAnimationFrame(animationFrameIdRef.current);
+                animationFrameIdRef.current = null;
             }
             inputBufferRef.current = [];
             return;
         }
 
-        if (!gameLoopIntervalRef.current) {
-            console.log("Client loop: Starting interval...");
-            
-            // Calculate effective tick rate based on boost state
-            const effectiveTickRate = isBoosting 
-                ? tickRate / tickMultiplier  // Faster ticks when boosting
-                : tickRate;
-                
-            gameLoopIntervalRef.current = setInterval(() => {
-                let moveDirection: Direction;
+        lastTickTimeRef.current = performance.now();
 
+        const gameLoop = (timestamp: number) => {
+            const currentTickRate = isBoostingRef.current 
+                ? tickRateRef.current / tickMultiplier 
+                : tickRateRef.current;
+                
+            // Check if enough time has passed for a tick
+            if (timestamp - lastTickTimeRef.current >= currentTickRate) {
+                lastTickTimeRef.current = timestamp;
+                
+                // Process movement - same logic as before
+                let moveDirection: Direction;
                 if (inputBufferRef.current.length > 0) {
                     moveDirection = inputBufferRef.current.shift()!;
                 } else {
@@ -169,19 +184,23 @@ export const useClientGameLoop = ({
 
                     return newSegments;
                 });
+            }
+            
+            // Schedule next frame
+            animationFrameIdRef.current = requestAnimationFrame(gameLoop);
+        };
 
-            }, effectiveTickRate);
-        }
+        // Start the animation loop
+        animationFrameIdRef.current = requestAnimationFrame(gameLoop);
 
-        // Clean up
+        // Cleanup
         return () => {
-            if (gameLoopIntervalRef.current) {
-                console.log("Client loop: Cleaning up interval.");
-                clearInterval(gameLoopIntervalRef.current);
-                gameLoopIntervalRef.current = null;
+            if (animationFrameIdRef.current) {
+                cancelAnimationFrame(animationFrameIdRef.current);
+                animationFrameIdRef.current = null;
             }
         };
-    }, [isRespawning, gridSize, tickRate, isBoosting]); // Add isBoosting to dependencies
+    }, [isRespawning, gridSize, tickMultiplier]);
 
     return {
         segments,

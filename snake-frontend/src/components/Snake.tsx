@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 
 // Adjust transition duration to be slightly less than the tick rate (200ms)
 const TRANSITION_DURATION_MS = 180; // Increased from 80ms to 180ms
@@ -11,33 +11,28 @@ interface SnakeProps {
 }
 
 const Snake: React.FC<SnakeProps> = ({ segments, hue, gridSize, isBoosting = false }) => {
-    // Add color cycling with animation frame for smooth transitions
-    const [colorCycleOffset, setColorCycleOffset] = useState(0);
+    // Use a more efficient approach for color cycling
+    const [colorCycle, setColorCycle] = useState(0);
     
-    // Use an effect to animate color cycling when boosting
+    // Memoize segment colors to reduce calculations
+    const segmentColors = useMemo(() => {
+        if (!isBoosting) return null;
+        
+        // Precalculate colors for all segments when boosting state changes
+        return segments.map((_, index) => {
+            return (colorCycle + index * 20) % 360;
+        });
+    }, [segments.length, colorCycle, isBoosting]);
+    
+    // Update color cycle less frequently (30fps instead of 60fps)
     useEffect(() => {
         if (!isBoosting) return;
         
-        let animationFrameId: number;
-        let lastTimestamp: number;
+        const intervalId = setInterval(() => {
+            setColorCycle(prev => (prev + 5) % 360); // Increment by larger steps
+        }, 33); // ~30fps
         
-        // Animate at 60fps for smooth color cycling
-        const animateColors = (timestamp: number) => {
-            if (!lastTimestamp) lastTimestamp = timestamp;
-            const elapsed = timestamp - lastTimestamp;
-            
-            // Update color cycle - adjust speed value (10) to control cycle speed
-            setColorCycleOffset(prev => (prev + elapsed * 0.3) % 360);
-            
-            lastTimestamp = timestamp;
-            animationFrameId = requestAnimationFrame(animateColors);
-        };
-        
-        animationFrameId = requestAnimationFrame(animateColors);
-        
-        return () => {
-            cancelAnimationFrame(animationFrameId);
-        };
+        return () => clearInterval(intervalId);
     }, [isBoosting]);
     
     return (
@@ -46,29 +41,23 @@ const Snake: React.FC<SnakeProps> = ({ segments, hue, gridSize, isBoosting = fal
                 const isHead = index === 0;
                 const imageUrl = isHead ? '/assets/snakehead.png' : '/assets/snakebody.png';
                 
-                // Calculate hue for this segment
-                let segmentHue = hue;
+                // Use precalculated colors when boosting
+                const segmentHue = isBoosting && segmentColors 
+                    ? segmentColors[index]
+                    : hue;
                 
-                if (isBoosting) {
-                    // Create a vibrant, flashing color effect
-                    // Base hue alternates through the spectrum rapidly
-                    const baseHue = (colorCycleOffset + index * 20) % 360;
-                    segmentHue = baseHue;
-                }
-                
-                const style: React.CSSProperties = {
+                const style = {
                     left: `${(segment.x / gridSize) * 100}%`,
                     top: `${(segment.y / gridSize) * 100}%`,
                     width: `${(1 / gridSize) * 100}%`,
                     height: `${(1 / gridSize) * 100}%`,
-                    // Faster transition when boosting
-                    transition: `left ${isBoosting ? TRANSITION_DURATION_MS * 0.6 : TRANSITION_DURATION_MS}ms linear, 
-                                top ${isBoosting ? TRANSITION_DURATION_MS * 0.6 : TRANSITION_DURATION_MS}ms linear`,
-                    position: 'absolute',
+                    transition: `left ${isBoosting ? 160 : 180}ms linear, top ${isBoosting ? 160 : 180}ms linear`,
+                    position: 'absolute' as const,
                     lineHeight: 0,
                     filter: `hue-rotate(${segmentHue}deg) ${isBoosting ? 'saturate(2) brightness(1.2)' : ''}`,
-                    // Optional: add slight pulse effect when boosting
-                    transform: isBoosting ? `scale(${1 + Math.sin(colorCycleOffset / 50) * 0.05})` : 'scale(1)',
+                    // Simpler transform without sine calculation for better performance
+                    transform: isBoosting ? 'scale(1.05)' : 'scale(1)',
+                    willChange: 'left, top, filter', // Hint to browser to optimize these properties
                 };
                 
                 return (
