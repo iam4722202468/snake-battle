@@ -119,7 +119,7 @@ export class Game {
         
         // Use client segments as the base for this tick's calculation
         let currentSegments = [...data.segments]; 
-        // const head = currentSegments[0]; // head variable not used after removing teleport logic
+        const head = currentSegments[0];
 
         // Update player segments with the client's predicted positions
         player.segments = currentSegments; 
@@ -132,8 +132,6 @@ export class Game {
             this.apple = this.getRandomPosition(); 
             this.broadcastAppleEat(socketId); 
         } else {
-            // Ensure server size matches segment length if no apple eaten
-            // This handles cases where client prediction might temporarily mismatch length
             player.size = player.segments.length; 
         }
 
@@ -300,23 +298,29 @@ export class Game {
     private sendInitialState(playerId: string): void {
         const player = this.players.get(playerId);
         if (!player || player.ws.readyState !== WebSocket.OPEN) {
+            console.log(`Cannot send initial state to ${playerId}, player not found or WS not open.`);
             return;
         }
 
+        console.log(`Sending initial state to ${playerId}...`); // Add logging
+
+        // First, assign ID
         player.ws.send(JSON.stringify({
             type: 'assign_id',
             payload: { id: playerId }
         }));
 
+        // Wait a small amount of time before sending game_state to ensure client processes the ID first
         setTimeout(() => {
             if (player && player.ws.readyState === WebSocket.OPEN) {
                 const gameStatePayload = this.getGameState();
+                console.log(`Sending initial game_state to ${playerId} after ID assignment`);
                 player.ws.send(JSON.stringify({
                     type: 'game_state',
                     payload: gameStatePayload
                 }));
             }
-        }, 50);
+        }, 50); // 50ms delay should be enough for most clients to process the ID
     }
     
     // Get current game state

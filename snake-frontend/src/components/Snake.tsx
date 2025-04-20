@@ -14,7 +14,12 @@ const Snake: React.FC<SnakeProps> = ({
     isBoosting = false,
 }) => {
     const [colorCycle, setColorCycle] = useState(0);
-
+    
+    const segmentColors = useMemo(() => {
+        if (!isBoosting) return null;
+        return segments.map((_, index) => (colorCycle + index * 20) % 360);
+    }, [segments.length, colorCycle, isBoosting]);
+    
     useEffect(() => {
         if (!isBoosting) return;
         

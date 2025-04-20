@@ -18,6 +18,7 @@ interface UseClientGameLoopProps {
 
 interface ClientGameLoopState {
     segments: Position[];
+    direction: Direction;
     displayDirection: Direction;
     addInput: (newDirection: Direction) => void;
     setSegments: React.Dispatch<React.SetStateAction<Position[]>>;
@@ -27,6 +28,7 @@ export const useClientGameLoop = ({
     gridSize = 20,
     apple,
     tickRate = 200,
+    clientId,
     isRespawning,
     initialPosition,
     onPositionUpdate,
@@ -35,6 +37,7 @@ export const useClientGameLoop = ({
     gameMode = 'playing',
 }: UseClientGameLoopProps): ClientGameLoopState => {
     const [segments, setSegments] = useState<Position[]>([{ x: 10, y: 10 }]);
+    const [direction, setDirection] = useState<Direction>('right');
     const [displayDirection, setDisplayDirection] = useState<Direction>('right');
 
     const currentDirectionRef = useRef<Direction>('right');
@@ -51,12 +54,14 @@ export const useClientGameLoop = ({
     useEffect(() => { appleRef.current = apple; }, [apple]);
     useEffect(() => { isBoostingRef.current = isBoosting; }, [isBoosting]);
     useEffect(() => { tickRateRef.current = tickRate; }, [tickRate]);
+    useEffect(() => { currentDirectionRef.current = direction; }, [direction]);
     useEffect(() => { segmentsRef.current = segments; }, [segments]);
 
     useEffect(() => {
         if (initialPosition) {
             setSegments([initialPosition]);
             const initialDir = 'right';
+            setDirection(initialDir);
             setDisplayDirection(initialDir);
             currentDirectionRef.current = initialDir;
             inputBufferRef.current = [];
@@ -111,6 +116,7 @@ export const useClientGameLoop = ({
                     moveDirection = currentDirectionRef.current;
                 }
                 currentDirectionRef.current = moveDirection; 
+                // setDirection(moveDirection); // Let server state dictate this via Game.tsx
 
                 const currentSegments = segmentsRef.current;
                 if (currentSegments.length === 0) {
@@ -158,6 +164,7 @@ export const useClientGameLoop = ({
 
     return {
         segments,
+        direction,
         displayDirection,
         addInput,
         setSegments,
