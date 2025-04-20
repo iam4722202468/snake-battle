@@ -12,9 +12,11 @@ const Apple: React.FC<AppleProps> = ({ position, gridSize }) => {
         width: `${(1 / gridSize) * 100}%`,
         height: `${(1 / gridSize) * 100}%`,
         position: 'absolute',
+        objectFit: 'contain',
+        imageRendering: 'pixelated',
     };
 
-    return <div className="absolute bg-red-600 rounded-full" style={style} />;
+    return <img src="/assets/coin.png" alt="Coin" className="absolute" style={style} />;
 };
 
 export default Apple;
